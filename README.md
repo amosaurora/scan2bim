@@ -1,4 +1,4 @@
-To use: change directories in data/<dataset>, dataloaders, train_<model>.py
+To use: change directories in data/(dataset), dataloaders, train_(model).py
 
  ```
 @inproceedings{Campagnolo2023fully,
