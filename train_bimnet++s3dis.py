@@ -8,12 +8,14 @@ torch.backends.cudnn.benchmark = True
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch import nn
+import argparse
 
 from model.bimnet import BIMNet
+from util.losses import ClassWiseCrossEntropyLoss, HNMCrossEntropyLoss
+from dataloaders.PCSdataset import PCSDataset
 from dataloaders.S3DISdataset import S3DISDataset
 from util.metrics import Metrics
-from util.common_util import log_pcs, schedule
-import argparse
+from util.common_util import schedule, log_pcs
 
 #set seed for reproducibility
 seed = 12345
@@ -51,11 +53,11 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", type=int, default=6, help='batch_size')
     parser.add_argument("--cube_edge", type=int, default=96, help='granularity of voxelization train')
     parser.add_argument("--val_cube_edge", type=int, default=96, help='granularity of voxelization val')
-    parser.add_argument("--num_classes", type=int, default=13, help='number of classes to consider')
-    parser.add_argument("--dset_path", type=str, default="/media/elena/M2SSD/datasets/S3DIS/original_ply", help='dataset path')
+    parser.add_argument("--num_classes", type=int, default=8, help='number of classes to consider')
+    parser.add_argument("--dset_path", type=str, default="/media/elena/M2SSD/datasets/HePIC/HePIC", help='dataset path')
     parser.add_argument("--test_name", type=str, default='test', help='optional test name')
     parser.add_argument("--pretrain", type=str, help='pretrained model path')
-    parser.add_argument("--loss", choices=['ce'], default='ce', type=str, help='which loss to use')
+    parser.add_argument("--loss", choices=['ce','cwce','ohem','mixed'], default='mixed', type=str, help='which loss to use')
     args = parser.parse_args()
 
     lr0 = 2.5e-4
@@ -64,7 +66,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    logdir = "log/train_s3dis" + args.test_name
+    logdir = "log/train_bimnet10" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
     writer = SummaryWriter(logdir, flush_secs=.5)
 
@@ -79,9 +81,11 @@ if __name__ == '__main__':
         model.load_state_dict(new)
         print("model restored from ", args.pretrain)
     model.to(device)
-
+        
+    # Load dataset
     dataset = S3DISDataset
     dset = dataset(root_path=args.dset_path,
+                   #fsl=50,
                    cube_edge=args.cube_edge)
     dloader = DataLoader(dset,
                          batch_size=args.batch_size,
@@ -98,13 +102,13 @@ if __name__ == '__main__':
                          shuffle=False,
                          num_workers=4)
 
-    loss = nn.CrossEntropyLoss(ignore_index=-1, weight=torch.sqrt(torch.tensor(dset.weights, dtype=torch.float32, device=device))) #weight=torch.tensor(dset.weights, dtype=torch.float32, device=device)) #
-    
+
     # set up parameters for training
     steps_per_epoch = len(dset)//args.batch_size
     tot_steps = steps_per_epoch*args.epochs
     optim = Adam(model.parameters(), weight_decay=1e-5)
     
+
     # to visualize point cloud
     pts = 2*torch.from_numpy(np.indices((args.val_cube_edge, args.val_cube_edge, args.val_cube_edge))
                              .reshape(3, -1).T).unsqueeze(0)/args.cube_edge - 1.
@@ -112,6 +116,16 @@ if __name__ == '__main__':
 
     if args.loss == 'ce':
         loss = nn.CrossEntropyLoss(ignore_index=-1)
+    elif args.loss == 'cwce':
+        loss = ClassWiseCrossEntropyLoss(ignore_index=-1)
+    elif args.loss == 'ohem':
+        loss = HNMCrossEntropyLoss(ignore_index=-1)
+    elif args.loss == 'mixed':
+        loss1 = nn.CrossEntropyLoss(ignore_index=-1, weight=torch.sqrt(
+                    torch.tensor(dset.weights, dtype=torch.float32,
+                                device=device)))  # weight=torch.tensor(dset.weights, dtype=torch.float32, device=device))
+        loss2 = ClassWiseCrossEntropyLoss(ignore_index=-1, 
+                    weight=torch.tensor(np.ones_like(dset.weights), dtype=torch.float32, device=device))
     else:
         raise NotImplementedError
 
@@ -120,27 +134,34 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
         #Evaluate every n epochs
-        if e % eval_every_n_epochs == 0:
-            miou, o, y = validate(writer, vset, vloader, e, model, device)
-            if miou>best_miou:
-                best_miou = miou
-                torch.save(model.state_dict(), logdir+"/val_best.pth")
-            #log_pcs(writer, pts, o, y)
+        if e % eval_every_n_epochs == 0:           
+            if e>=0:
+                miou, o, y = validate(writer, vset, vloader, e, model, device)
+                if miou>best_miou:
+                    best_miou = miou
+                    torch.save(model.state_dict(), logdir+"/val_best.pth")
+                #log_pcs(writer, dset, pts, o, y)
             metrics = Metrics(dset.cnames[1:], device=device)
-        
+       
         pbar = tqdm(dloader, total=steps_per_epoch, desc="Epoch %d/%d, Loss: %.2f, mIoU: %.2f, Progress"%(e+1, args.epochs, 0., 0.))
+
         for i, (x, y) in enumerate(pbar):
-            
+
             step = i+steps_per_epoch*e
+
+            lam = schedule(0, 1, step, tot_steps, .9)
+           
             lr = schedule(lr0, lre, step, tot_steps, .9)
             optim.param_groups[0]['lr'] = lr
-            
             optim.zero_grad()
             
             x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
             
             o = model(x)
-            l = loss(o, y)
+            if args.loss == 'mixed':
+                l = loss2(o, y) * (1 - lam) + loss1(o, y) * (lam)
+            else:
+                l = loss(o, y)
             l.backward()
 
             metrics.add_sample(o.detach().argmax(dim=1).flatten(), y.flatten())

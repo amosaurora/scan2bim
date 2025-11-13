@@ -9,8 +9,8 @@ from plyfile import PlyData
 
 class S3DISDataset(Dataset):
     def __init__(self,
-                 root_path="data/S3DIS",
-                 splits_path="data/S3DIS",
+                 root_path="Scan-to-BIM",
+                 splits_path="Scan-to-BIM",
                  split="train",
                  cube_edge=128,
                  augment=True):
@@ -27,19 +27,19 @@ class S3DISDataset(Dataset):
         self.items = [l.strip() for l in open(path.join(splits_path, split+'.txt'), 'r')]
 
     def init_cmap(self):
-        cmap = np.array(  [[128, 64,128], # road
-                           [244, 35,232], # sidewalk
-                           [ 70, 70, 70], # building
-                           [102,102,156], # wall
-                           [190,153,153], # fence
-                           [153,153,153], # pole
-                           [250,170, 30], # traffic light
-                           [220,220,  0], # traffic sign
-                           [107,142, 35], # vegetation
-                           [152,251,152], # terrain
-                           [ 70,130,180], # sky
-                           [220, 20, 60], # person
-                           [  0,  0,142], # car
+        cmap = np.array(  [[128, 64,128], # ceiling
+                           [244, 35,232], # floor
+                           [ 70, 70, 70], # wall
+                           [102,102,156], # beam
+                           [190,153,153], # column
+                           [153,153,153], # window
+                           [250,170, 30], # door
+                        #    [220,220,  0], # traffic sign
+                        #    [107,142, 35], # vegetation
+                        #    [152,251,152], # terrain
+                        #    [ 70,130,180], # sky
+                        #    [220, 20, 60], # person
+                        #    [  0,  0,142], # car
                            [  0,  0,  0]], dtype=np.uint8) # unassigned
         return cmap
 
@@ -52,18 +52,14 @@ class S3DISDataset(Dataset):
                  5: 'column',
                  6: 'window',
                  7: 'door',
-                 8: 'table',
-                 9: 'chair',
-                10: 'sofa',
-                11: 'bookcase',
-                12: 'board',
-                13: 'clutter'}
+        }
         idmap = {v:k for k,v in idmap.items()}
         return idmap
         
     def init_weights(self):
         pts = np.array( [3370714, 2856755, 4919229, 318158, 375640, 478001, 974733, 650464, 791496, 88727, 1284130, 229758, 2272837] , dtype=np.int32)
-        return 1/pts
+        merged_pts = np.array([pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]+pts[8]+pts[9]+pts[10]+pts[11]+pts[12]])
+        return 1/merged_pts
 
     def __len__(self):
         return len(self.items)
@@ -73,13 +69,37 @@ class S3DISDataset(Dataset):
             return self.cmap[lab.numpy()]/255.
         else:
             return self.cmap[lab.numpy()]
+        
+    def remap_labels(self, labels):
+        # Original S3DIS classes → new simplified labels
+        remap_dict = {
+            0: 0,   # unassigned → unassigned
+            1: 1,   # ceiling
+            2: 2,   # floor
+            3: 3,   # wall
+            4: 4,   # beam
+            5: 5,   # column
+            6: 6,   # window
+            7: 7,   # door
+            8: 8,   # table → other
+            9: 8,   # chair → other
+            10: 8,  # sofa → other
+            11: 8,  # bookcase → other
+            12: 8,  # board → other
+            13: 8   # clutter → other
+        }
+        # Efficient remapping
+        labels = np.vectorize(remap_dict.get)(labels)
+        return labels
 
     def __getitem__(self, item):
         fname = path.join(self.root_path, self.items[item])
         
         data = PlyData.read(fname)
         xyz = np.array([data['vertex']['x'], data['vertex']['y'], data['vertex']['z']]).T #np.array([[x,y,z] for x,y,z,_,_,_,_ in data['vertex']])
-        lab = data['vertex'][['class']].astype(int)+1 #np.array([l for _,_,_,_,_,_,l in data['vertex']])
+        lab = data['vertex'][['label']].astype(int)+1 #np.array([l for _,_,_,_,_,_,l in data['vertex']])
+        lab = np.squeeze(np.array(lab))
+        lab = self.remap_labels(lab)  
 
         # center & rescale PC in [-1,1]
         xyz -= xyz.mean(axis=0)

@@ -3,7 +3,7 @@ from os import listdir, path
 
 np.random.seed(12345)
 
-dpath = "D:/Datasets/S3DIS"
+dpath = "Scan-to-BIM"
 fnames = [f for f in listdir(dpath) if path.isfile(path.join(dpath,f)) and not f.startswith('.')]
 per = np.random.permutation(len(fnames))
 fnames = [fnames[i] for i in per]

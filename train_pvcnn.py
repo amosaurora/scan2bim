@@ -55,7 +55,7 @@ def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=5000, help='number of epochs to run')
+    parser.add_argument("--epochs", type=int, default=500, help='number of epochs to run')
     parser.add_argument("--batch_size", type=int, default=8, help='batch_size')
     parser.add_argument("--cube_edge", type=int, default=96, help='granularity of voxelization train')
     parser.add_argument("--val_cube_edge", type=int, default=96, help='granularity of voxelization val')
