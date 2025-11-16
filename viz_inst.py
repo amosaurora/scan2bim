@@ -3,6 +3,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import pyransac3d as pyrsc
 
 import torch
 torch.backends.cudnn.benchmark = True
@@ -409,6 +410,47 @@ def run_bimnet_inference(pcd, models, cube_edge=128, num_classes=8, device="cuda
     pcd.colors = o3d.utility.Vector3dVector(point_colors)
     return pcd, preds, points_grid
 
+def ransac_fit(instances_dict, target_classes = ("wall", "floor", "ceiling"), thresh=0.05, min_points=100, max_iter=1000):
+    planes = {}
+    for class_name, instances in instances_dict.items():
+        if class_name not in target_classes:
+            continue
+
+        class_planes = []
+        for inst_idx, inst_pcd in enumerate(instances):
+            pts = np.asarray(inst_pcd.points)
+            if pts.shape[0] < min_points:
+                print(f"Skipping {class_name} instance {inst_idx}: not enough points ({pts.shape[0]})")
+                continue
+
+            plane = pyrsc.Plane()
+            equation, inliers = plane.fit(pts, thresh=thresh,
+                                          minPoints=min_points,
+                                          maxIteration=max_iter)
+
+            # Store plane info
+            class_planes.append({
+                "equation": equation,
+                "inliers": inliers,  # these are actual xyz inlier points
+            })
+
+            # === Optional: recolor instance for visualization ===
+            # Inliers = red, others = light grey
+            colors = np.ones_like(pts) * 0.7  # grey
+            # Because pyRANSAC-3D returns inlier POINTS, not indices,
+            # we match them by equality. For large clouds you might want a KDTree instead.
+            for p in inliers:
+                idx = np.where(np.all(pts == p, axis=1))[0]
+                if len(idx) > 0:
+                    colors[idx] = np.array([1.0, 0.0, 0.0])  # red
+
+            inst_pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        if class_planes:
+            planes[class_name] = class_planes
+
+    return planes
+
 def main(
     input_file,
     output_dir="output_instances",
@@ -429,9 +471,8 @@ def main(
       6. Optional visualizations
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_paths = checkpoint_paths or [
-        "../log/train_bimnet10_10epochs8classes/val_best.pth"
-    ]
+    checkpoint_paths = checkpoint_paths 
+    
 
     print("=" * 60)
     print("Point Cloud Instantiation Workflow (BIMNet + DBSCAN)")
@@ -491,6 +532,13 @@ def main(
         )
         all_instances[class_name] = instances
 
+    planes = ransac_fit(all_instances, target_classes=("wall", "floor", "ceiling"),
+                        thresh=0.05, min_points=100, max_iter=1000)
+    print("Fitted planes summary:")
+    for cname, plist in planes.items():
+        for i, p in enumerate(plist):
+            print(f"{cname} instance {i}: equation = {p['equation']}")
+
     # Step 5: Save results
     print("\nStep 3: Saving instantiated point clouds...")
     save_instances(all_instances, output_dir)
@@ -521,7 +569,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         action="append",
-        default=["../log/train_bimnet10_10epochs8classes/val_best.pth"],
+        default=[],
         help="Path(s) to BIMNet checkpoint(s). "
              "Use multiple --checkpoint args for ensembling.",
     )
