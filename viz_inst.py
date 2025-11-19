@@ -3,6 +3,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import pyransac3d as pyrsc
 
 import torch
 torch.backends.cudnn.benchmark = True
@@ -38,69 +39,42 @@ def load_point_cloud(file_path):
     print(f"Loaded {len(pcd.points)} points")
     return pcd
 
-def separate_by_color_class(pcd):
+# Map label IDs -> semantic names (match your training setup)
+ID_TO_NAME = {
+    0: "ceiling",
+    1: "floor",
+    2: "wall",
+    3: "beam",
+    4: "column",
+    5: "window",
+    6: "door",
+    7: "unassigned",
+}
+
+def separate_by_label(pcd, point_labels):
     """
-    Separate point cloud by semantic class (color).
-    
-    Classes (based on your BIMNet results):
-    - ceiling
-    - floor
-    - wall
-    - beam
-    - column
-    - window
-    - door
-    - unassigned
-    
-    Returns: Dictionary mapping class names to point clouds
+    Split point cloud into semantic classes using integer labels, not colors.
+
+    pcd          : Open3D point cloud with all points
+    point_labels : np.ndarray [N] of integer label IDs (0..7)
     """
-    if not pcd.has_colors():
-        raise ValueError("Point cloud must have color information for semantic separation")
-    
-    # Get points and colors as numpy arrays
     points = np.asarray(pcd.points)
     colors = np.asarray(pcd.colors)
-    
-    # Convert colors to integer RGB values (0-255)
-    colors_int = (colors * 255).astype(np.uint8)
-    
-    # Define color mappings for each class
-    # TODO: You'll need to adjust these based on your actual color scheme
-    # Common color schemes: check what colors BIMNet uses
-    class_colors = {
-        'ceiling': (128, 64,128),      # Red - adjust as needed
-        'floor': (244, 35,232),     # Green - adjust as needed
-        'wall': (70, 70, 70),      # Blue - adjust as needed
-        'beam': (102,102,156),  # Yellow - adjust as needed
-        'column': (102,102,156),    # Magenta - adjust as needed
-        'window': (190,153,153),  # Cyan - adjust as needed
-        'door': (153,153,153),    # Purple - adjust as needed
-        'unassigned': (0,  0,  0),   # Orange - adjust as needed
-    }
-    
-    # Tolerance for color matching (colors might not be exact due to processing)
-    color_tolerance = 10
-    
-    separated_classes = {}
-    
-    for class_name, target_color in class_colors.items():
-        # Find points within color tolerance
-        color_diff = np.abs(colors_int - np.array(target_color))
-        matching_mask = np.all(color_diff <= color_tolerance, axis=1)
-        
-        if np.any(matching_mask):
-            class_points = points[matching_mask]
-            class_colors_array = colors[matching_mask]
-            
-            # Create point cloud for this class
-            class_pcd = o3d.geometry.PointCloud()
-            class_pcd.points = o3d.utility.Vector3dVector(class_points)
-            class_pcd.colors = o3d.utility.Vector3dVector(class_colors_array)
-            
-            separated_classes[class_name] = class_pcd
-            print(f"  {class_name}: {len(class_points)} points")
-    
-    return separated_classes
+
+    separated = {}
+    for class_id, class_name in ID_TO_NAME.items():
+        mask = (point_labels == class_id)
+        if not np.any(mask):
+            continue
+
+        class_pcd = o3d.geometry.PointCloud()
+        class_pcd.points = o3d.utility.Vector3dVector(points[mask])
+        class_pcd.colors = o3d.utility.Vector3dVector(colors[mask])
+
+        separated[class_name] = class_pcd
+        print(f"  {class_name}: {mask.sum()} points")
+
+    return separated
 
 def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     """
@@ -405,9 +379,73 @@ def run_bimnet_inference(pcd, models, cube_edge=128, num_classes=8, device="cuda
         points_grid[:, 1],
         points_grid[:, 2],
     ]
+    point_labels = preds[
+        points_grid[:, 0],
+        points_grid[:, 1],
+        points_grid[:, 2]
+    ]
+
+    # unique, counts = np.unique(point_labels, return_counts=True)
+    # print("\nLabel distribution over points:")
+    # for u, c in zip(unique, counts):
+    #     print(f"  label {u}: {c} points")
 
     pcd.colors = o3d.utility.Vector3dVector(point_colors)
-    return pcd, preds, points_grid
+    return pcd, preds, points_grid, point_labels
+
+def ransac_fit(instances_dict, target_classes=("wall", "floor", "ceiling"),
+               thresh=0.01, min_points=100, max_iter=1000):
+    print("Running ransac_fit...")
+    print("Instances dict classes:", list(instances_dict.keys()))
+    print("Target classes:", target_classes)
+
+    planes = {}
+    for class_name, instances in instances_dict.items():
+        print(f"\nClass {class_name}: {len(instances)} instances")
+        if class_name not in target_classes:
+            print(f"  Skipping {class_name} (not in target_classes)")
+            continue
+
+        class_planes = []
+        for inst_idx, inst_pcd in enumerate(instances):
+            pts = np.asarray(inst_pcd.points)
+            print(f"  Instance {inst_idx}: {pts.shape[0]} points")
+
+            if pts.shape[0] < min_points:
+                print(f"    Skipping: not enough points (min_points={min_points})")
+                continue
+
+            plane = pyrsc.Plane()
+            equation, inliers = plane.fit(
+                pts,
+                thresh=thresh,
+                minPoints=min_points,
+                maxIteration=max_iter,
+            )
+            print(f"    Fitted plane: eq={equation}, inliers={len(inliers)}")
+
+            class_planes.append({
+                "equation": equation,
+                "inliers": inliers,
+            })
+
+            # recolor for visualization
+            colors = np.ones_like(pts) * 0.7
+            for p in inliers:
+                idx = np.where(np.all(pts == p, axis=1))[0]
+                if len(idx) > 0:
+                    colors[idx] = np.array([1.0, 0.0, 0.0])
+            inst_pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        if class_planes:
+            planes[class_name] = class_planes
+            print(f"  -> Stored {len(class_planes)} planes for class {class_name}")
+        else:
+            print(f"  -> No planes stored for class {class_name}")
+
+    print("\nDone ransac_fit.")
+    return planes
+
 
 def main(
     input_file,
@@ -429,9 +467,8 @@ def main(
       6. Optional visualizations
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_paths = checkpoint_paths or [
-        "../log/train_bimnet10_10epochs8classes/val_best.pth"
-    ]
+    checkpoint_paths = checkpoint_paths 
+    
 
     print("=" * 60)
     print("Point Cloud Instantiation Workflow (BIMNet + DBSCAN)")
@@ -446,7 +483,7 @@ def main(
     models = build_models(checkpoint_paths, device, num_classes=num_classes)
 
     print("\nRunning BIMNet inference...")
-    pcd, preds_volume, points_grid = run_bimnet_inference(
+    pcd, preds_volume, points_grid, point_labels = run_bimnet_inference(
         pcd,
         models,
         cube_edge=cube_edge,
@@ -460,7 +497,7 @@ def main(
 
     # Step 3: Separate by semantic class (color)
     print("\nStep 1: Separating point cloud by semantic class...")
-    separated_classes = separate_by_color_class(pcd)
+    separated_classes = separate_by_label(pcd, point_labels)
 
     if not separated_classes:
         print("Warning: No classes found! Check your color mappings.")
@@ -490,6 +527,13 @@ def main(
             min_points=params['min_points'],
         )
         all_instances[class_name] = instances
+
+    planes = ransac_fit(all_instances, target_classes=("wall", "floor", "ceiling"),
+                        thresh=0.05, min_points=100, max_iter=1000)
+    # print("Fitted planes summary:")
+    # for cname, plist in planes.items():
+    #     for i, p in enumerate(plist):
+    #         print(f"{cname} instance {i}: equation = {p['equation']}")
 
     # Step 5: Save results
     print("\nStep 3: Saving instantiated point clouds...")
@@ -521,7 +565,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         action="append",
-        default=["../log/train_bimnet10_10epochs8classes/val_best.pth"],
+        default=[],
         help="Path(s) to BIMNet checkpoint(s). "
              "Use multiple --checkpoint args for ensembling.",
     )

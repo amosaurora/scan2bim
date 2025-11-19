@@ -34,24 +34,18 @@ class S3DISDataset(Dataset):
                            [190,153,153], # column
                            [153,153,153], # window
                            [250,170, 30], # door
-                        #    [220,220,  0], # traffic sign
-                        #    [107,142, 35], # vegetation
-                        #    [152,251,152], # terrain
-                        #    [ 70,130,180], # sky
-                        #    [220, 20, 60], # person
-                        #    [  0,  0,142], # car
                            [  0,  0,  0]], dtype=np.uint8) # unassigned
         return cmap
 
     def init_idmap(self):
-        idmap = {0: 'unassigned',
-                 1: 'ceiling',
-                 2: 'floor',
-                 3: 'wall',
-                 4: 'beam',
-                 5: 'column',
-                 6: 'window',
-                 7: 'door',
+        idmap = {0: 'ceiling',
+                 1: 'floor',
+                 2: 'wall',
+                 3: 'beam',
+                 4: 'column',
+                 5: 'window',
+                 6: 'door', 
+                 7: 'unassigned',
         }
         idmap = {v:k for k,v in idmap.items()}
         return idmap
@@ -73,20 +67,20 @@ class S3DISDataset(Dataset):
     def remap_labels(self, labels):
         # Original S3DIS classes → new simplified labels
         remap_dict = {
-            0: 0,   # unassigned → unassigned
-            1: 1,   # ceiling
-            2: 2,   # floor
-            3: 3,   # wall
-            4: 4,   # beam
-            5: 5,   # column
-            6: 6,   # window
-            7: 7,   # door
-            8: 8,   # table → other
-            9: 8,   # chair → other
-            10: 8,  # sofa → other
-            11: 8,  # bookcase → other
-            12: 8,  # board → other
-            13: 8   # clutter → other
+            0: 0,   # ceiling 
+            1: 1,   # floor
+            2: 2,   # wall
+            3: 3,   # beam
+            4: 4,   # column
+            5: 5,   # window
+            6: 6,   # door
+            7: 7,   # unassigned
+            8: 7,   # table → unassigned
+            9: 7,   # chair → unassigned
+            10: 7,  # sofa → unassigned
+            11: 7,  # bookcase → unassigned
+            12: 7,  # board → unassigned
+            13: 7   # clutter → unassigned
         }
         # Efficient remapping
         labels = np.vectorize(remap_dict.get)(labels)
