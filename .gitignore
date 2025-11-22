@@ -51,9 +51,9 @@ coverage.xml
 docs/_build/
 
 #other files to ignore
-.png
-.jpg
-.jpeg
+*.png
+*.jpg
+*.jpeg
 .bmp
 
 .pt
@@ -67,7 +67,15 @@ out
 *pred
 log*
 *.zip
+*.ply
+*.pth
+*.json
+*.rar
+
+
 
 #folders to ignore
 output_instances/
 PLY files/
+scan2bim/
+HePIC/

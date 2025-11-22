@@ -159,12 +159,22 @@ def save_instances(instances_dict, output_dir):
     
     print(f"\nSummary saved to {output_path / 'instantiation_summary.json'}")
 
+    combined_pc = o3d.geometry.PointCloud()
+    
+    for class_name, instances in instances_dict.items():
+        for instance in instances:
+            combined_pc += instance   # merge point clouds
+    
+    combined_filename = output_path / "all_instances_combined.ply"
+    o3d.io.write_point_cloud(str(combined_filename), combined_pc)
+    print(f"Combined point cloud saved to {combined_filename}")
+
 def generate_distinct_colors(n_colors):
     """
     Generate n distinct colors for visualization.
     Uses a colormap to ensure colors are visually distinct.
     """
-    try:
+    try: 
         # Try new matplotlib API (v3.5+)
         cmap = plt.colormaps['tab20']
     except (AttributeError, KeyError):
@@ -183,7 +193,7 @@ def visualize_original_pointcloud(pcd):
     """
     print("\nVisualizing original point cloud...")
     print("Close the window to continue.")
-    o3d.visualization.draw_geometries([pcd], 
+    o3d.visualization.draw_geometries_with_editing([pcd], 
                                       window_name="Original Point Cloud",
                                       width=1024, 
                                       height=768)
@@ -344,6 +354,30 @@ def color_label(labels, num_classes=8):
     colors = cmap(flat % num_classes)[:, :3]  # RGB only
     return colors.reshape((*labels.shape, 3))
 
+def rotate_point_cloud(pcd, rotations):
+    """
+    Rotate a point cloud with multiple axis-angle rotations.
+
+    rotations: list of tuples (axis, angle_degrees)
+               Example: [("x", 90), ("z", 45)]
+    """
+    for axis, angle_deg in rotations:
+        angle_rad = np.radians(angle_deg)
+
+        if axis == "x":
+            R = pcd.get_rotation_matrix_from_xyz((angle_rad, 0, 0))
+        elif axis == "y":
+            R = pcd.get_rotation_matrix_from_xyz((0, angle_rad, 0))
+        elif axis == "z":
+            R = pcd.get_rotation_matrix_from_xyz((0, 0, angle_rad))
+        else:
+            raise ValueError(f"Invalid axis: {axis}, choose from x,y,z")
+
+        pcd.rotate(R, center=(0, 0, 0))
+
+    return pcd
+
+
 def run_bimnet_inference(pcd, models, cube_edge=128, num_classes=8, device="cuda"):
     """
     Run BIMNet on a point cloud and assign semantic colors to each point.
@@ -422,7 +456,8 @@ def ransac_fit(instances_dict, target_classes=("wall", "floor", "ceiling"),
                 minPoints=min_points,
                 maxIteration=max_iter,
             )
-            print(f"    Fitted plane: eq={equation}, inliers={len(inliers)}")
+            # print(f"    Fitted plane: eq={equation}, inliers={len(inliers)}")
+
 
             class_planes.append({
                 "equation": equation,
@@ -456,6 +491,7 @@ def main(
     device=None,
     visualize_network_output=False,
     visualize_instances_flag=False,
+    rotate=None,
 ):
     """
     Main workflow:
@@ -477,6 +513,21 @@ def main(
     # Step 1: Load point cloud
     input_path = Path(input_file)
     pcd = load_point_cloud(input_path)
+    rotations = []
+    if args.rotate:
+        for r in args.rotate:
+            try:
+                axis, deg = r.split(":")
+                rotations.append((axis.lower(), float(deg)))
+            except:
+                raise ValueError("Rotation must be in format axis:degrees (e.g., x:90)")
+
+
+    if rotations:
+        print(f"Applying rotations: {rotations}")
+        pcd = rotate_point_cloud(pcd, rotations)
+
+
 
     # Step 2: Load models and run BIMNet
     print("\nLoading BIMNet models...")
@@ -509,13 +560,13 @@ def main(
 
     dbscan_params = {
         'ceiling':   {'eps': 0.2, 'min_points': 200},
-        'floor':     {'eps': 0.3, 'min_points': 300},
-        'wall':      {'eps': 0.15, 'min_points': 100},
+        'floor':     {'eps': 0.2, 'min_points': 200},
+        'wall':      {'eps': 0.2, 'min_points': 300},
         'beam':      {'eps': 0.1, 'min_points': 150},
         'column':    {'eps': 0.1, 'min_points': 50},
         'window':    {'eps': 0.1, 'min_points': 50},
-        'door':      {'eps': 0.3, 'min_points': 300},
-        'unassigned': {'eps': 0.2, 'min_points': 150},
+        'door':      {'eps': 0.15, 'min_points': 100},
+        'unassigned': {'eps': 0.1, 'min_points': 200},
     }
 
     for class_name, class_pcd in separated_classes.items():
@@ -596,7 +647,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Visualize DBSCAN instances summary",
     )
-
+    parser.add_argument(
+        "--rotate",
+        nargs="+",
+        help="Rotation in format axis:degrees. Example: --rotate x:90 z:45 y:-30",
+    )
+    
     args = parser.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -609,6 +665,7 @@ if __name__ == "__main__":
         device=device,
         visualize_network_output=args.vis_net,
         visualize_instances_flag=args.vis_instances,
+        rotate=args.rotate
     )
 # if __name__ == '__main__':
 #     cube_edge = 128
