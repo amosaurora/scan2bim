@@ -9,8 +9,8 @@ from plyfile import PlyData
 
 class S3DISDataset(Dataset):
     def __init__(self,
-                 root_path="Scan-to-BIM",
-                 splits_path="Scan-to-BIM",
+                 root_path="../Scan-to-BIM",
+                 splits_path="../Scan-to-BIM",
                  split="train",
                  cube_edge=128,
                  augment=True):

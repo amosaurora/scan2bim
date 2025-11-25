@@ -13,6 +13,7 @@ import argparse
 from model.bimnet import BIMNet
 from util.losses import ClassWiseCrossEntropyLoss, HNMCrossEntropyLoss
 from dataloaders.PCSdataset import PCSDataset
+from dataloaders.S3DISdataset import S3DISDataset
 from util.metrics import Metrics
 from util.common_util import schedule, log_pcs
 
@@ -23,25 +24,63 @@ torch.manual_seed(seed)
 
 
 ###### VALIDATION
-def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
+# def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
+#     metric = Metrics(vset.cnames[1:], device=device)
+#     model.eval()
+#     with torch.no_grad():
+#         for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vset)):
+#             x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
+#             o = model(x)
+#             metric.add_sample(o.argmax(dim=1).flatten(), y.flatten())
+#             #break
+#     miou = metric.percent_mIoU()
+#     acc = metric.percent_acc()
+#     prec = metric.percent_prec()
+#     writer.add_scalar('mIoU', miou, epoch)
+#     writer.add_scalar('PP', prec, epoch)
+#     writer.add_scalar('PA', acc, epoch)
+#     writer.add_scalars('IoU', {n:100*v for n,v in zip(metric.name_classes, metric.IoU()) if not torch.isnan(v)}, epoch)
+#     print(metric)
+#     model.train()
+#     return miou, o, y
+
+def validate(writer, vset, vloader, epoch, model, device, loss_fn=None): #PA, PP, mIoU
     metric = Metrics(vset.cnames[1:], device=device)
     model.eval()
+    val_loss = 0.0
+    n_batches = 0
+
     with torch.no_grad():
         for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vset)):
-            x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
+            x, y = x.to(device), y.to(device, dtype=torch.long) # shift indices 
             o = model(x)
             metric.add_sample(o.argmax(dim=1).flatten(), y.flatten())
-            #break
+
+            if loss_fn is not None:
+                l = loss_fn(o, y)
+                val_loss += l.item()
+                n_batches += 1
+
     miou = metric.percent_mIoU()
     acc = metric.percent_acc()
     prec = metric.percent_prec()
+
     writer.add_scalar('mIoU', miou, epoch)
     writer.add_scalar('PP', prec, epoch)
     writer.add_scalar('PA', acc, epoch)
     writer.add_scalars('IoU', {n:100*v for n,v in zip(metric.name_classes, metric.IoU()) if not torch.isnan(v)}, epoch)
+
+    if loss_fn is not None and n_batches > 0:
+        avg_val_loss = val_loss / n_batches
+        writer.add_scalar('epoch/val_loss', avg_val_loss, epoch)
+        print(f"Val loss @ epoch {epoch+1}: {avg_val_loss:.4f}")
+    else:
+        avg_val_loss = None
+
     print(metric)
     model.train()
-    return miou, o, y
+    return miou, o, y, avg_val_loss
+
 
 
 
@@ -49,7 +88,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=5000, help='number of epochs to run')
-    parser.add_argument("--batch_size", type=int, default=4, help='batch_size')
+    parser.add_argument("--batch_size", type=int, default=8, help='batch_size')
     parser.add_argument("--cube_edge", type=int, default=64, help='granularity of voxelization train')
     parser.add_argument("--val_cube_edge", type=int, default=64, help='granularity of voxelization val')
     parser.add_argument("--num_classes", type=int, default=8, help='number of classes to consider')
@@ -59,13 +98,14 @@ if __name__ == '__main__':
     parser.add_argument("--loss", choices=['ce','cwce','ohem','mixed'], default='mixed', type=str, help='which loss to use')
     args = parser.parse_args()
 
-    lr0 = 2.5e-4
-    lre = 1e-5
+    # lr0 = 2.5e-4
+    lr0 = 1e-4
+    lre = 1e-6
     eval_every_n_epochs = 10
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    logdir = "log/train_pcs" + "_" + args.test_name
+    logdir = "log/train_bimnet++" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
     writer = SummaryWriter(logdir, flush_secs=.5)
 
@@ -82,7 +122,8 @@ if __name__ == '__main__':
     model.to(device)
         
     # Load dataset
-    dataset = PCSDataset
+    # dataset = PCSDataset
+    dataset = S3DISDataset
     dset = dataset(root_path=args.dset_path,
                    #fsl=50,
                    cube_edge=args.cube_edge)
@@ -121,10 +162,10 @@ if __name__ == '__main__':
         loss = HNMCrossEntropyLoss(ignore_index=-1)
     elif args.loss == 'mixed':
         loss1 = nn.CrossEntropyLoss(ignore_index=-1, weight=torch.sqrt(
-                    torch.tensor(dset.weights[1:], dtype=torch.float32,
+                    torch.tensor(dset.weights, dtype=torch.float32,
                                 device=device)))  # weight=torch.tensor(dset.weights, dtype=torch.float32, device=device))
         loss2 = ClassWiseCrossEntropyLoss(ignore_index=-1, 
-                    weight=torch.tensor(np.ones_like(dset.weights[1:]), dtype=torch.float32, device=device))
+                    weight=torch.tensor(np.ones_like(dset.weights), dtype=torch.float32, device=device))
     else:
         raise NotImplementedError
 
@@ -132,17 +173,33 @@ if __name__ == '__main__':
     for e in range(args.epochs):
         torch.cuda.empty_cache()
 
-        #Evaluate every n epochs
-        if e % eval_every_n_epochs == 0:           
-            if e>=0:
-                miou, o, y = validate(writer, vset, vloader, e, model, device)
-                if miou>best_miou:
-                    best_miou = miou
-                    torch.save(model.state_dict(), logdir+"/val_best.pth")
-                #log_pcs(writer, dset, pts, o, y)
+        # #Evaluate every n epochs
+        # if e % eval_every_n_epochs == 0:           
+        #     if e>=0:
+        #         miou, o, y = validate(writer, vset, vloader, e, model, device)
+        #         if miou>best_miou:
+        #             best_miou = miou
+        #             torch.save(model.state_dict(), logdir+"/val_best.pth")
+        #         #log_pcs(writer, dset, pts, o, y)
+        #     metrics = Metrics(dset.cnames[1:], device=device)
+        
+        if e % eval_every_n_epochs == 0:
+            if args.loss == 'mixed':
+                def val_loss_fn(o, y):
+                    # simple, stable choice: average of the two
+                    return 0.5 * loss1(o, y) + 0.5 * loss2(o, y)
+            else:
+                val_loss_fn = loss
+
+            miou, o, y, val_loss = validate(writer, vset, vloader, e, model, device, loss_fn=val_loss_fn)
+
+            if miou > best_miou:
+                best_miou = miou
+                torch.save(model.state_dict(), logdir+"/val_best.pth")
             metrics = Metrics(dset.cnames[1:], device=device)
        
         pbar = tqdm(dloader, total=steps_per_epoch, desc="Epoch %d/%d, Loss: %.2f, mIoU: %.2f, Progress"%(e+1, args.epochs, 0., 0.))
+        epoch_loss = 0.0    
 
         for i, (x, y) in enumerate(pbar):
 
@@ -162,6 +219,7 @@ if __name__ == '__main__':
             else:
                 l = loss(o, y)
             l.backward()
+            epoch_loss += l.item()
 
             metrics.add_sample(o.detach().argmax(dim=1).flatten(), y.flatten())
 
@@ -172,11 +230,13 @@ if __name__ == '__main__':
             writer.add_scalar('lr', lr, step)
             writer.add_scalar('loss', l.item(), step)
             writer.add_scalar('step_mIoU', miou, step)
+        avg_epoch_loss = epoch_loss / steps_per_epoch
+        writer.add_scalar('epoch_loss', avg_epoch_loss, e)
 
         torch.save(model.state_dict(), logdir+"/latest.pth")
         
     # EVALUATION
-    miou, o, y = validate(writer, vset, vloader, e, model, device)
+    miou, o, y, val_loss = validate(writer, vset, vloader, e, model, device)
     if miou>best_miou:
         best_miou = miou
         torch.save(model.state_dict(), logdir+"/val_best.pth")
