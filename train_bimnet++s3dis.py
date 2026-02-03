@@ -49,8 +49,8 @@ def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=500, help='number of epochs to run')
-    parser.add_argument("--batch_size", type=int, default=6, help='batch_size')
+    parser.add_argument("--epochs", type=int, default=100, help='number of epochs to run')
+    parser.add_argument("--batch_size", type=int, default=4, help='batch_size')
     parser.add_argument("--cube_edge", type=int, default=96, help='granularity of voxelization train')
     parser.add_argument("--val_cube_edge", type=int, default=96, help='granularity of voxelization val')
     parser.add_argument("--num_classes", type=int, default=8, help='number of classes to consider')
@@ -60,7 +60,7 @@ if __name__ == '__main__':
     parser.add_argument("--loss", choices=['ce','cwce','ohem','mixed'], default='mixed', type=str, help='which loss to use')
     args = parser.parse_args()
 
-    lr0 = 2.5e-4
+    lr0 = 5e-5
     lre = 1e-5
     eval_every_n_epochs = 10
 
@@ -130,6 +130,13 @@ if __name__ == '__main__':
         raise NotImplementedError
 
     # TRAINING PHASE
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze ONLY the final output layer (classifier)
+    for param in model.out.parameters():
+        param.requires_grad = True
+
     for e in range(args.epochs):
         torch.cuda.empty_cache()
 
@@ -142,6 +149,11 @@ if __name__ == '__main__':
                     torch.save(model.state_dict(), logdir+"/val_best.pth")
                 #log_pcs(writer, dset, pts, o, y)
             metrics = Metrics(dset.cnames[1:], device=device)
+
+        if e == 5:
+            print("Unfreezing encoder...")
+            for param in model.parameters():
+                param.requires_grad = True
        
         pbar = tqdm(dloader, total=steps_per_epoch, desc="Epoch %d/%d, Loss: %.2f, mIoU: %.2f, Progress"%(e+1, args.epochs, 0., 0.))
 

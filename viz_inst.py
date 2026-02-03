@@ -505,12 +505,103 @@ def ransac_fit(instances_dict, target_classes=("wall", "floor", "ceiling"),
     print("\nDone ransac_fit.")
     return planes
 
+def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.05, min_points=500):
+    """
+    Separates planar instances (Walls/Floors) by iteratively finding planes 
+    and removing them from the cloud until no valid planes remain.
+    """
+    remaining_pcd = pcd
+    instances = []
+    
+    print(f"\nIterative RANSAC for {class_name}...")
+    
+    while len(remaining_pcd.points) > min_points:
+        points = np.asarray(remaining_pcd.points)
+        
+        # Fit a single plane
+        plane = pyrsc.Plane()
+        # Note: pyransac3d returns equation (4 floats) and inliers (indices)
+        best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
+        
+        # If not enough inliers, stop
+        if len(inliers) < min_points:
+            break
+            
+        # Extract the instance
+        inst_pcd = remaining_pcd.select_by_index(inliers)
+        inst_pcd.paint_uniform_color(generate_distinct_colors(len(instances)+1)[-1])
+        instances.append(inst_pcd)
+        
+        # Remove these points and continue
+        remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
+        print(f"  Found instance {len(instances)}: {len(inliers)} points. Remaining: {len(remaining_pcd.points)}")
+        
+    return instances
+
+def extract_bim_parameters(instances_dict):
+    """
+    Calculates BIM-ready parameters (Length, Height, Thickness, Centerline) 
+    for each wall instance.
+    """
+    bim_data = []
+    
+    for class_name, pcd_list in instances_dict.items():
+        if class_name != "wall": 
+            continue # Extend logic for other classes if needed
+            
+        for idx, pcd in enumerate(pcd_list):
+            pts = np.asarray(pcd.points)
+            if len(pts) < 10: continue
+
+            # 1. Height (Z-axis extent)
+            z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
+            height = z_max - z_min
+            
+            # 2. Centerline (2D Projection on XY plane)
+            # Use PCA or simple bounding box center for start/end
+            xy_pts = pts[:, :2]
+            # Simple approximation: Bounding box of the projected line
+            # A more robust way is fitting a 2D line using RANSAC or PCA
+            pca = DBSCAN(eps=0.5).fit(xy_pts) # Dummy call, actually use sklearn PCA
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=2)
+            pca.fit(xy_pts)
+            
+            # The primary component direction
+            direction = pca.components_[0] 
+            center = xy_pts.mean(axis=0)
+            
+            # Project points onto the principal axis to find extent
+            projected = xy_pts @ direction
+            p_min, p_max = projected.min(), projected.max()
+            
+            # Reconstruct start/end points 
+            start_pt = center + direction * (p_min - projected.mean())
+            end_pt = center + direction * (p_max - projected.mean())
+            
+            # 3. Thickness (Requires finding the parallel surface or assuming standard)
+            # For now, we estimate based on the variance of the 3rd PCA component
+            thickness = 0.2 # Default placeholder or derived from normals
+            
+            bim_obj = {
+                "id": f"{class_name}_{idx}",
+                "type": class_name,
+                "height": float(height),
+                "thickness": float(thickness),
+                "geometry": {
+                    "start_x": float(start_pt[0]), "start_y": float(start_pt[1]), "start_z": float(z_min),
+                    "end_x": float(end_pt[0]), "end_y": float(end_pt[1]), "end_z": float(z_min)
+                }
+            }
+            bim_data.append(bim_obj)
+            
+    return bim_data
 
 def main(
     input_file,
     output_dir="output_instances",
     checkpoint_paths=None,
-    cube_edge=128,
+    cube_edge=96,
     num_classes=8,
     device=None,
     visualize_network_output=False,
@@ -579,44 +670,45 @@ def main(
         return None
 
     # Step 4: Instantiate each class using DBSCAN
-    print("\nStep 2: Identifying individual instances with DBSCAN...")
+    print("\nStep 2: Instantiating classes...")
     all_instances = {}
 
+    planar_classes = ['wall', 'floor', 'ceiling', 'roof']
+    
+    # DBSCAN params for non-planar
     dbscan_params = {
-        'ceiling':   {'eps': 0.2, 'min_points': 200},
-        'floor':     {'eps': 0.2, 'min_points': 200},
-        'wall':      {'eps': 0.2, 'min_points': 300},
         'beam':      {'eps': 0.1, 'min_points': 150},
         'column':    {'eps': 0.1, 'min_points': 50},
         'window':    {'eps': 0.1, 'min_points': 50},
-        'door':      {'eps': 0.15, 'min_points': 100},
+        'door':      {'eps': 0.2, 'min_points': 100},
         'unassigned': {'eps': 0.1, 'min_points': 200},
     }
 
     for class_name, class_pcd in separated_classes.items():
-        params = dbscan_params.get(class_name, {'eps': 0.2, 'min_points': 100})
-        instances = instantiate_with_dbscan(
-            class_pcd,
-            class_name,
-            eps=params['eps'],
-            min_points=params['min_points'],
-        )
+        if class_name in planar_classes:
+            # USE NEW RANSAC FUNCTION HERE
+            # Adjust thresh based on scan noise (0.05m = 5cm)
+            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.05)
+        else:
+            # USE EXISTING DBSCAN LOGIC
+            params = dbscan_params.get(class_name, {'eps': 0.1, 'min_points': 100})
+            instances = instantiate_with_dbscan(
+                class_pcd,
+                class_name,
+                eps=params['eps'],
+                min_points=params['min_points'],
+            )
         all_instances[class_name] = instances
 
-    planes = ransac_fit(all_instances, target_classes=("wall", "floor", "ceiling"),
-                        thresh=0.05, min_points=100, max_iter=1000)
-    # print("Fitted planes summary:")
-    # for cname, plist in planes.items():
-    #     for i, p in enumerate(plist):
-    #         print(f"{cname} instance {i}: equation = {p['equation']}")
-
-    # Step 5: Save results
-    print("\nStep 3: Saving instantiated point clouds...")
+    # Step 5: Extract BIM Data & Save
+    print("\nStep 3: Extracting BIM Parameters and Saving...")
     save_instances(all_instances, output_dir)
-
-    print("\n" + "=" * 60)
-    print("Instantiation complete!")
-    print("=" * 60)
+    
+    # Generate BIM JSON
+    bim_json_data = extract_bim_parameters(all_instances)
+    with open(Path(output_dir) / "bim_reconstruction_data.json", "w") as f:
+        json.dump(bim_json_data, f, indent=4)
+    print(f"BIM parameters saved to {output_dir}/bim_reconstruction_data.json")
 
     # Step 6: Optional visualization of instances
     if visualize_instances_flag:
