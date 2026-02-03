@@ -72,7 +72,7 @@ log*
 *.json
 *.rar
 
-
+countpoints.py
 
 #folders to ignore
 output_instances/

@@ -51,9 +51,11 @@ class S3DISDataset(Dataset):
         return idmap
         
     def init_weights(self):
-        pts = np.array( [3370714, 2856755, 4919229, 318158, 375640, 478001, 974733, 650464, 791496, 88727, 1284130, 229758, 2272837] , dtype=np.int32)
-        merged_pts = np.array([pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]+pts[8]+pts[9]+pts[10]+pts[11]+pts[12]])
-        return 1/merged_pts
+        # pts = np.array( [3370714, 2856755, 4919229, 318158, 375640, 478001, 974733, 650464, 791496, 88727, 1284130, 229758, 2272837] , dtype=np.int32)
+        pts = np.array([217074, 28422379, 117924669, 546463, 3995718, 11357051, 4960637, 41740453], dtype=np.int32)
+        # change the pts to match the remapped labels
+        # merged_pts = np.array([pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]+pts[8]+pts[9]+pts[10]+pts[11]+pts[12]])
+        return (1/pts) + 1e-6
 
     def __len__(self):
         return len(self.items)
