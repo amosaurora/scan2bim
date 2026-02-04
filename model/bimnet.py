@@ -64,15 +64,15 @@ class BIMNet(nn.Module):
         
         self.rn2 = SepInvRes(8, 48)
         self.bn2 = nn.InstanceNorm3d(8)
-        self.conv2 = SepConv(8, 32, 7)
+        self.conv2 = SepConv(8, 16, 7)
         
-        self.rn3 = SepInvRes(32, 96)
-        self.bn3 = nn.InstanceNorm3d(32)
-        self.conv3 = SepConv(32, 16, 7)
+        self.rn3 = SepInvRes(16, 96)
+        self.bn3 = nn.InstanceNorm3d(16)
+        self.conv3 = SepConv(16, 32, 7)
         
-        self.rn4 = SepInvRes(16, 64)
-        self.bn4 = nn.InstanceNorm3d(16)
-        self.conv4 = SepConv(16, 128, 7)
+        self.rn4 = SepInvRes(32, 64)
+        self.bn4 = nn.InstanceNorm3d(32)
+        self.conv4 = SepConv(32, 128, 7)
         
         self.out = SepConv(128, num_classes, 3)
         self.relu = nn.ReLU()#inplace=True)

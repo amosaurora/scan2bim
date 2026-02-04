@@ -106,7 +106,7 @@ if __name__ == '__main__':
     # set up parameters for training
     steps_per_epoch = len(dset)//args.batch_size
     tot_steps = steps_per_epoch*args.epochs
-    optim = Adam(model.parameters(), weight_decay=1e-5)
+    optim = Adam(model.parameters(), weight_decay=1e-6)
     
 
     # to visualize point cloud
