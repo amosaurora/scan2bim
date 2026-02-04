@@ -75,7 +75,7 @@ class BIMNet(nn.Module):
         self.conv4 = SepConv(32, 128, 7)
         
         self.out = SepConv(128, num_classes, 3)
-        self.relu = nn.ReLU()#inplace=True)
+        self.relu = nn.ReLU() #inplace=True)
         
     def forward(self, x):
     

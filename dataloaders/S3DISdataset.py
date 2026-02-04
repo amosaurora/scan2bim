@@ -9,8 +9,8 @@ from plyfile import PlyData
 
 class S3DISDataset(Dataset):
     def __init__(self,
-                 root_path="Scan-to-BIM",
-                 splits_path="Scan-to-BIM",
+                 root_path="../Scan-to-BIM",
+                 splits_path="../Scan-to-BIM",
                  split="train",
                  cube_edge=128,
                  augment=True):
@@ -95,7 +95,20 @@ class S3DISDataset(Dataset):
         
         data = PlyData.read(fname)
         xyz = np.array([data['vertex']['x'], data['vertex']['y'], data['vertex']['z']]).T #np.array([[x,y,z] for x,y,z,_,_,_,_ in data['vertex']])
-        lab = data['vertex'][['label']].astype(int)+1 #np.array([l for _,_,_,_,_,_,l in data['vertex']])
+        # lab = data['vertex'][['label']].astype(int)+1 #np.array([l for _,_,_,_,_,_,l in data['vertex']])
+        if 'label' in data['vertex']:
+            raw_lab = data['vertex']['label']
+        elif 'scalar_label' in data['vertex']:
+            raw_lab = data['vertex']['scalar_label']
+        elif 'scalar_Classification' in data['vertex']:
+            raw_lab = data['vertex']['scalar_Classification']
+        else:
+            # Print available keys to help debug if it fails again
+            available_keys = str(data['vertex'].data.dtype.names)
+            raise KeyError(f"Label field not found in {fname}. Available keys: {available_keys}")
+
+        # 2. Convert to integer (safely handling floats)
+        lab = np.round(raw_lab).astype(np.int32)
         lab = np.squeeze(np.array(lab))
         lab = self.remap_labels(lab)  
 

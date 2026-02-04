@@ -267,14 +267,38 @@ def visualize_summary(instances_dict, separated_classes, original_pcd):
     if response.lower() == 'y':
         visualize_instances(instances_dict, show_by_class=True)
 
+def finetune_model(checkpoint_path, device, num_old_classes, num_new_classes):
+    state_old = torch.load(checkpoint_path, map_location=device)
+    model_new = BIMNet(num_classes=num_new_classes)
+    state_new = model_new.state_dict()
+
+    transferred, skipped = [], []
+    for k, v in state_old.items():
+        if k in state_new and state_new[k].shape == v.shape:
+            state_new[k] = v
+            transferred.append(k)
+        else:
+            skipped.append(k)
+    
+    if skipped:
+        print("Skipped parameters:")
+        for k in skipped:
+            print(f" - {k} : {state_old[k].shape}")
+
+    model_new.load_state_dict(state_new)
+    model_new.to(device)
+    model_new.train()
+
+    return model_new
+
 def build_models(checkpoint_paths, device, num_classes=8):
     models = []
     for ckpt in checkpoint_paths:
         print(f"Loading checkpoint: {ckpt}")
-        model = BIMNet(num_classes=num_classes)
-        state = torch.load(ckpt, map_location=device)
-        model.load_state_dict(state)
-        model.to(device)
+        model = finetune_model(ckpt, device, num_old_classes=13, num_new_classes=num_classes)
+        # state = torch.load(ckpt, map_location=device)
+        # model.load_state_dict(state)
+        # model.to(device)
         model.eval()
         models.append(model)
     return models

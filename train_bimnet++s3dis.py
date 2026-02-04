@@ -66,7 +66,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    logdir = "log/train_bimnet10" + "_" + args.test_name
+    logdir = "log/train_bimnet++100" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
     writer = SummaryWriter(logdir, flush_secs=.5)
 
