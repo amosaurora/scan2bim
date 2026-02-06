@@ -16,6 +16,8 @@ from dataloaders.PCSdataset import PCSDataset
 from dataloaders.S3DISdataset import S3DISDataset
 from util.metrics import Metrics
 from util.common_util import schedule, log_pcs
+import warnings
+warnings.filterwarnings("ignore")
 
 #set seed for reproducibility
 seed = 12345
@@ -66,7 +68,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    logdir = "log/train_bimnet++100" + "_" + args.test_name
+    logdir = "log/train_bimnet++" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
     writer = SummaryWriter(logdir, flush_secs=.5)
 
@@ -175,7 +177,7 @@ if __name__ == '__main__':
             else:
                 l = loss(o, y)
             l.backward()
-
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             metrics.add_sample(o.detach().argmax(dim=1).flatten(), y.flatten())
 
             optim.step()

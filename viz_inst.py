@@ -304,13 +304,33 @@ def build_models(checkpoint_paths, device, num_classes=8):
     return models
 
 def voxelize_points(points, cube_edge):
-    min_bounds = points.min(0)
-    max_bounds = points.max(0)
-    points_norm = (points - min_bounds) / (max_bounds - min_bounds + 1e-8)
-    points_grid = (points_norm * (cube_edge - 1)).astype(np.int32)
+    """
+    Normalize points to match S3DISDataset.py training logic exactly.
+    """
+    # 1. Center on Mean (Match Dataset __getitem__)
+    points_centered = points - points.mean(axis=0)
+    
+    # 2. Scale by Max Absolute Value to [-1, 1] range
+    # We add 1e-8 to avoid division by zero
+    max_val = np.abs(points_centered).max() + 1e-8
+    points_norm = points_centered / max_val
+    
+    # 3. Shift to [0, 2] range (Match Dataset 'else' block)
+    points_shifted = points_norm + 1.0
+    
+    # 4. Scale to Grid Size [0, cube_edge]
+    # Note: dataset uses (cube_edge // 2) because range is 0..2
+    # So 2 * (cube_edge // 2) = cube_edge
+    scale_factor = cube_edge // 2
+    points_grid = np.round(points_shifted * scale_factor).astype(np.int32)
+    
+    # 5. Clip to ensure we stay inside grid boundaries
     points_grid = np.clip(points_grid, 0, cube_edge - 1)
+
+    # 6. Create Voxel Grid
     vox = np.zeros((1, cube_edge, cube_edge, cube_edge), dtype=np.float32)
     vox[0, points_grid[:, 0], points_grid[:, 1], points_grid[:, 2]] = 1.0
+
     return vox, points_grid
 
 def color_label(labels, num_classes=8):

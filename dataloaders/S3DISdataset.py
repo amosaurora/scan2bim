@@ -12,7 +12,7 @@ class S3DISDataset(Dataset):
                  root_path="../Scan-to-BIM",
                  splits_path="../Scan-to-BIM",
                  split="train",
-                 cube_edge=128,
+                 cube_edge=96,
                  augment=True):
 
         self.root_path = root_path
