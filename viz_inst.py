@@ -73,7 +73,7 @@ def separate_by_label(pcd, point_labels):
 
     return separated
 
-def smooth_labels_knn(pcd, labels, k=15):
+def smooth_labels_knn(pcd, labels, k=5):
     """
     Replaces each point's label with the majority label of its k-nearest neighbors.
     Removes 'salt-and-pepper' noise.
@@ -253,7 +253,7 @@ def visualize_summary(instances_dict, separated_classes, original_pcd):
     print("\n" + "=" * 60)
     print("VISUALIZATION MODE")
     print("=" * 60)
-    o3d.visualization.draw_geometries([original_pcd], window_name="Original", width=800, height=600)
+    # o3d.visualization.draw_geometries([original_pcd], window_name="Original", width=800, height=600)
     
     if separated_classes:
         o3d.visualization.draw_geometries(list(separated_classes.values()), window_name="Semantic Classes", width=800, height=600)
@@ -304,30 +304,18 @@ def build_models(checkpoint_paths, device, num_classes=8):
     return models
 
 def voxelize_points(points, cube_edge):
-    """
-    Normalize points to match S3DISDataset.py training logic exactly.
-    """
-    # 1. Center on Mean (Match Dataset __getitem__)
     points_centered = points - points.mean(axis=0)
     
-    # 2. Scale by Max Absolute Value to [-1, 1] range
-    # We add 1e-8 to avoid division by zero
     max_val = np.abs(points_centered).max() + 1e-8
     points_norm = points_centered / max_val
     
-    # 3. Shift to [0, 2] range (Match Dataset 'else' block)
     points_shifted = points_norm + 1.0
     
-    # 4. Scale to Grid Size [0, cube_edge]
-    # Note: dataset uses (cube_edge // 2) because range is 0..2
-    # So 2 * (cube_edge // 2) = cube_edge
     scale_factor = cube_edge // 2
     points_grid = np.round(points_shifted * scale_factor).astype(np.int32)
     
-    # 5. Clip to ensure we stay inside grid boundaries
     points_grid = np.clip(points_grid, 0, cube_edge - 1)
 
-    # 6. Create Voxel Grid
     vox = np.zeros((1, cube_edge, cube_edge, cube_edge), dtype=np.float32)
     vox[0, points_grid[:, 0], points_grid[:, 1], points_grid[:, 2]] = 1.0
 
@@ -478,11 +466,11 @@ def main(
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens
     print("\nStep 0.5: Smoothing predictions with KNN...")
-    point_labels = smooth_labels_knn(pcd, point_labels, k=15)
+    point_labels = smooth_labels_knn(pcd, point_labels, k=10)
     
-    if visualize_network_output:
-        print("\nVisualizing BIMNet semantic prediction...")
-        o3d.visualization.draw_geometries([pcd])
+    # if visualize_network_output:
+    #     print("\nVisualizing BIMNet semantic prediction...")
+    #     o3d.visualization.draw_geometries([pcd])
 
     # Step 3: Separate by semantic class (color)
     print("\nStep 1: Separating point cloud by semantic class...")
@@ -500,10 +488,10 @@ def main(
     
     dbscan_params = {
         'beam':      {'eps': 0.1, 'min_points': 150},
-        'column':    {'eps': 0.1, 'min_points': 50},
-        'window':    {'eps': 0.05, 'min_points': 50},
-        'door':      {'eps': 0.07, 'min_points': 100},
-        'unassigned': {'eps': 0.1, 'min_points': 200},
+        'column':    {'eps': 0.1, 'min_points': 125},
+        'window':    {'eps': 0.05, 'min_points': 150},
+        'door':      {'eps': 0.07, 'min_points': 200},
+        'unassigned': {'eps': 0.03, 'min_points': 300},
     }
 
     for class_name, class_pcd in separated_classes.items():
@@ -522,13 +510,14 @@ def main(
 
     # UPDATED: Aggressive thresholds to delete ghost instances
     cleaning_thresholds = {
-        'ceiling': 5000, 
-        'floor': 5000,   
-        'wall': 2000,
+        'ceiling': 3000, 
+        'floor': 3000,   
+        'wall': 1500,
         'beam': 300,
         'column': 300,
         'door': 1000, 
-        'window': 300
+        'window': 300,
+        'unassigned': 100
     }
 
     all_instances = filter_small_instances(all_instances, cleaning_thresholds)
