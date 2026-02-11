@@ -491,7 +491,7 @@ def main(
         'column':    {'eps': 0.1, 'min_points': 125},
         'window':    {'eps': 0.05, 'min_points': 150},
         'door':      {'eps': 0.07, 'min_points': 200},
-        'unassigned': {'eps': 0.03, 'min_points': 300},
+        'unassigned': {'eps': 0.05, 'min_points': 200},
     }
 
     for class_name, class_pcd in separated_classes.items():

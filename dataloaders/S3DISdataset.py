@@ -114,44 +114,88 @@ class S3DISDataset(Dataset):
 
         # center & rescale PC in [-1,1]
         xyz -= xyz.mean(axis=0)
-        xyz /= np.abs(xyz).max()
+        xyz /= (np.abs(xyz).max() + 1e-8)
 
         if self.augment:
+            # Random Rotation: Limit tilt to Z-axis only (architectural data is gravity-aligned)
+            # Previous code allowed X/Y tilt which confuses 'Wall' vs 'Floor'
+            if np.random.random() < 0.5:
+                angle = np.pi * (np.random.random() - 0.5) # -90 to +90 deg
+                c, s = np.cos(angle), np.sin(angle)
+                R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+                xyz = np.dot(xyz, R.T)
 
-            # random rotation
-            if np.random.random()<.5:
-                r = R.from_rotvec(np.pi*(np.random.random(3,)-.5)*np.array([0.1,0.1,1])).as_matrix()
-                xyz = np.einsum('jk,nj->nk',r,xyz)
-                xyz /= np.abs(xyz).max()
+            # Random Shift: Keep small
+            if np.random.random() < 0.5:
+                xyz += (np.random.random((3,)) * 0.2 - 0.1) # Shift +/- 0.1
 
-            # random shift
-            if np.random.random()<.5:
-                xyz -= np.random.random((3,))*2-1.
-            else:
-                xyz += 1
+            # Random Rescale: Constrain to 0.8x - 1.2x
+            # (Old code allowed 0.0x to Infinity, causing spikes)
+            if np.random.random() < 0.5:
+                scale = 0.8 + 0.4 * np.random.random()
+                xyz *= scale
+                
+        # 5. Map to Voxel Grid [0, cube_edge]
+        # Map [-1, 1] -> [0, 2] -> [0, cube_edge]
+        xyz += 1.0 
+        xyz = np.round(xyz * (self.cube_edge // 2)).astype(int)
 
-            # random rescale & crop
-            if np.random.random()<.5:
-                if np.random.random()<.5:
-                    xyz = np.round(xyz*(self.cube_edge//2)*np.random.random()).astype(int)
-                else:
-                    xyz = np.round(xyz*(self.cube_edge//2)/np.random.random()).astype(int)
-            else:
-                xyz = np.round(xyz*(self.cube_edge//2)).astype(int)
-
-            valid = np.logical_and(np.all(xyz>-1, axis=1), np.all(xyz<self.cube_edge, axis=1))
-        else:
-            xyz += 1
-            xyz = np.round(xyz*(self.cube_edge//2)).astype(int)
-            valid = np.logical_and(np.all(xyz>-1, axis=1), np.all(xyz<self.cube_edge, axis=1))
-
+        # 6. Validity Check
+        valid = np.logical_and(np.all(xyz > -1, axis=1), np.all(xyz < self.cube_edge, axis=1))
         xyz = xyz[valid,:]
         lab = lab[valid]
 
+        # 7. Fill Grid
         geom = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.float32)
-        geom[tuple(xyz.T)] = 1
+        # Use simple indexing. If duplicates exist, last one wins (acceptable for segmentation)
+        # Check for empty after validity filter
+        if len(xyz) > 0:
+            geom[tuple(xyz.T)] = 1
 
-        labs = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.int64)
-        labs[tuple(xyz.T)] = lab
+            labs = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.int64)
+            labs[tuple(xyz.T)] = lab
+
+        else:
+            # Handle rare edge case where crop removed all points
+            labs = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.int64)
 
         return torch.from_numpy(geom).unsqueeze(0), torch.from_numpy(labs)
+        # if self.augment:
+
+        #     # random rotation
+        #     if np.random.random()<.5:
+        #         r = R.from_rotvec(np.pi*(np.random.random(3,)-.5)*np.array([0.1,0.1,1])).as_matrix()
+        #         xyz = np.einsum('jk,nj->nk',r,xyz)
+        #         xyz /= np.abs(xyz).max()
+
+        #     # random shift
+        #     if np.random.random()<.5:
+        #         xyz -= np.random.random((3,))*2-1.
+        #     else:
+        #         xyz += 1
+
+        #     # random rescale & crop
+        #     if np.random.random()<.5:
+        #         if np.random.random()<.5:
+        #             xyz = np.round(xyz*(self.cube_edge//2)*np.random.random()).astype(int)
+        #         else:
+        #             xyz = np.round(xyz*(self.cube_edge//2)/np.random.random()).astype(int)
+        #     else:
+        #         xyz = np.round(xyz*(self.cube_edge//2)).astype(int)
+
+        #     valid = np.logical_and(np.all(xyz>-1, axis=1), np.all(xyz<self.cube_edge, axis=1))
+        # else:
+        #     xyz += 1
+        #     xyz = np.round(xyz*(self.cube_edge//2)).astype(int)
+        #     valid = np.logical_and(np.all(xyz>-1, axis=1), np.all(xyz<self.cube_edge, axis=1))
+
+        # xyz = xyz[valid,:]
+        # lab = lab[valid]
+
+        # geom = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.float32)
+        # geom[tuple(xyz.T)] = 1
+
+        # labs = np.zeros((self.cube_edge, self.cube_edge, self.cube_edge), dtype=np.int64)
+        # labs[tuple(xyz.T)] = lab
+
+        # return torch.from_numpy(geom).unsqueeze(0), torch.from_numpy(labs)
