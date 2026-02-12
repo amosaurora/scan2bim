@@ -26,25 +26,66 @@ torch.manual_seed(seed)
 
 
 ###### VALIDATION
-def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
+# def validate(writer, vset, vloader, epoch, model, device): #PA, PP, mIoU
+#     metric = Metrics(vset.cnames[1:], device=device)
+#     model.eval()
+#     with torch.no_grad():
+#         for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vset)):
+#             x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
+#             o = model(x)
+#             metric.add_sample(o.argmax(dim=1).flatten(), y.flatten())
+#             #break
+#     miou = metric.percent_mIoU()
+#     acc = metric.percent_acc()
+#     prec = metric.percent_prec()
+#     writer.add_scalar('mIoU', miou, epoch)
+#     writer.add_scalar('PP', prec, epoch)
+#     writer.add_scalar('PA', acc, epoch)
+#     writer.add_scalars('IoU', {n:100*v for n,v in zip(metric.name_classes, metric.IoU()) if not torch.isnan(v)}, epoch)
+#     print(metric)
+#     model.train()
+#     return miou, o, y
+
+def validate(writer, vset, vloader, epoch, model, device, criterion): 
     metric = Metrics(vset.cnames[1:], device=device)
     model.eval()
+    
+    val_loss = 0.0  # Initialize loss accumulator
+    
     with torch.no_grad():
-        for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vset)):
-            x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
+        for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vloader)): # changed len(vset) to len(vloader) for accuracy
+            x, y = x.to(device), y.to(device, dtype=torch.long)-1 
             o = model(x)
+            
+            # --- NEW: Calculate Validation Loss ---
+            # We use the same loss function as training (or a standard one)
+            l = criterion(o, y)
+            val_loss += l.item()
+            # --------------------------------------
+
             metric.add_sample(o.argmax(dim=1).flatten(), y.flatten())
-            #break
+            
+    # Average the loss over the number of batches
+    val_loss /= len(vloader)
+    
     miou = metric.percent_mIoU()
     acc = metric.percent_acc()
     prec = metric.percent_prec()
-    writer.add_scalar('mIoU', miou, epoch)
-    writer.add_scalar('PP', prec, epoch)
-    writer.add_scalar('PA', acc, epoch)
-    writer.add_scalars('IoU', {n:100*v for n,v in zip(metric.name_classes, metric.IoU()) if not torch.isnan(v)}, epoch)
+    
+    # --- NEW: Log Validation Loss to TensorBoard ---
+    writer.add_scalar('Val/mIoU', miou, epoch)
+    writer.add_scalar('Val/Loss', val_loss, epoch) # <--- Track this!
+    writer.add_scalar('Val/Precision', prec, epoch)
+    writer.add_scalar('Val/Accuracy', acc, epoch)
+    # -----------------------------------------------
+    
+    print(f"\nEpoch {epoch+1} Validation Results:")
+    print(f"  Loss: {val_loss:.4f}")
+    print(f"  mIoU: {miou:.2f}%")
     print(metric)
+    
     model.train()
-    return miou, o, y
+    return miou, val_loss, o, y  # Return val_loss
 
 
 
@@ -116,6 +157,9 @@ if __name__ == '__main__':
                              .reshape(3, -1).T).unsqueeze(0)/args.cube_edge - 1.
     best_miou = 0
 
+    best_val_loss = float('inf')  # Start with infinity so first loss is always lower
+    val_criterion = nn.CrossEntropyLoss(ignore_index=-1).to(device)
+
     if args.loss == 'ce':
         loss = nn.CrossEntropyLoss(ignore_index=-1)
     elif args.loss == 'cwce':
@@ -143,14 +187,32 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
         #Evaluate every n epochs
+        # if e % eval_every_n_epochs == 0:           
+        #     if e>=0:
+        #         miou, o, y = validate(writer, vset, vloader, e, model, device)
+        #         if miou>best_miou:
+        #             best_miou = miou
+        #             torch.save(model.state_dict(), logdir+"/val_best.pth")
+        #         #log_pcs(writer, dset, pts, o, y)
+        #     metrics = Metrics(dset.cnames[1:], device=device)
         if e % eval_every_n_epochs == 0:           
-            if e>=0:
-                miou, o, y = validate(writer, vset, vloader, e, model, device)
-                if miou>best_miou:
+            if e >= 0:
+                # Pass val_criterion to the function
+                miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion)
+
+                # Check 1: Best mIoU (Original logic)
+                if miou > best_miou:
                     best_miou = miou
-                    torch.save(model.state_dict(), logdir+"/val_best.pth")
-                #log_pcs(writer, dset, pts, o, y)
-            metrics = Metrics(dset.cnames[1:], device=device)
+                    torch.save(model.state_dict(), logdir+"/val_best_miou.pth")
+                    print(f"  Saved new best mIoU model: {best_miou:.2f}%")
+
+                # Check 2: Best Loss (Global Minimum logic)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save(model.state_dict(), logdir+"/val_best_loss.pth")
+                    print(f"  Saved new best LOSS model: {best_val_loss:.4f}")
+
+                metrics = Metrics(dset.cnames[1:], device=device)
 
         if e == 5:
             print("Unfreezing encoder...")
@@ -191,7 +253,13 @@ if __name__ == '__main__':
         torch.save(model.state_dict(), logdir+"/latest.pth")
         
     # EVALUATION
-    miou, o, y = validate(writer, vset, vloader, e, model, device)
-    if miou>best_miou:
+    miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion)
+    
+    if miou > best_miou:
         best_miou = miou
-        torch.save(model.state_dict(), logdir+"/val_best.pth")
+        torch.save(model.state_dict(), logdir+"/val_best_miou.pth")
+        
+    # Optional: Save if this final run happened to be the best loss too
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        torch.save(model.state_dict(), logdir+"/val_best_loss.pth")
