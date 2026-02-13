@@ -291,7 +291,7 @@ def finetune_model(checkpoint_path, device, num_old_classes, num_new_classes):
 
     return model_new
 
-def build_models(checkpoint_paths, device, num_classes=8):
+def build_models(checkpoint_paths, device, num_classes=7):
     models = []
     for ckpt in checkpoint_paths:
         print(f"Loading checkpoint: {ckpt}")
@@ -321,13 +321,13 @@ def voxelize_points(points, cube_edge):
 
     return vox, points_grid
 
-def color_label(labels, num_classes=8):
+def color_label(labels, num_classes=7):
     cmap = plt.get_cmap("tab20", num_classes)
     flat = labels.flatten()
     colors = cmap(flat % num_classes)[:, :3] 
     return colors.reshape((*labels.shape, 3))
 
-def run_bimnet_inference(pcd, models, cube_edge=128, num_classes=8, device="cuda"):
+def run_bimnet_inference(pcd, models, cube_edge=96, num_classes=7, device="cuda"):
     points = np.asarray(pcd.points)
     print(f"Loaded {points.shape[0]} points")
     vox, points_grid = voxelize_points(points, cube_edge)
@@ -346,6 +346,7 @@ def run_bimnet_inference(pcd, models, cube_edge=128, num_classes=8, device="cuda
     point_labels = preds[points_grid[:, 0], points_grid[:, 1], points_grid[:, 2]]
 
     pcd.colors = o3d.utility.Vector3dVector(point_colors)
+    
     return pcd, preds, points_grid, point_labels
 
 def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.20, min_points=500):
@@ -438,7 +439,7 @@ def main(
     output_dir="output_instances",
     checkpoint_paths=None,
     cube_edge=96,
-    num_classes=8,
+    num_classes=7,
     device=None,
     visualize_network_output=False,
     visualize_instances_flag=False
@@ -462,6 +463,11 @@ def main(
     pcd, preds_volume, points_grid, point_labels = run_bimnet_inference(
         pcd, models, cube_edge=cube_edge, num_classes=num_classes, device=device
     )
+    print("\n[DEBUG] Visualizing RAW BIMNet output (Before Smoothing)...")
+        # This will open a window. You must close it for the script to continue.
+    o3d.visualization.draw_geometries([pcd], 
+                                    window_name="Raw BIMNet Prediction", 
+                                    width=1024, height=768)
 
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens
@@ -545,7 +551,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="output_instances", help="Directory to save instance PLYs")
     parser.add_argument("--checkpoint", action="append", default=[], help="Path(s) to BIMNet checkpoint(s)")
     parser.add_argument("--cube_edge", type=int, default=96, help="Voxel grid edge length")
-    parser.add_argument("--num_classes", type=int, default=8, help="Number of BIMNet output classes")
+    parser.add_argument("--num_classes", type=int, default=7, help="Number of BIMNet output classes")
     parser.add_argument("--cpu", action="store_true", help="Force CPU")
     parser.add_argument("--vis-net", action="store_true", help="Visualize BIMNet output")
     parser.add_argument("--vis-instances", action="store_true", help="Visualize DBSCAN instances")

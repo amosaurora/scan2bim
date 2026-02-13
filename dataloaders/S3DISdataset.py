@@ -84,13 +84,13 @@ class S3DISDataset(Dataset):
             4: 4,   # column
             5: 5,   # window
             6: 6,   # door
-            7: 7,   # unassigned
-            8: 7,   # table → unassigned
-            9: 7,   # chair → unassigned
-            10: 7,  # sofa → unassigned
-            11: 7,  # bookcase → unassigned
-            12: 7,  # board → unassigned
-            13: 7   # clutter → unassigned
+            7: -1,   # unassigned
+            8: -1,   # table → unassigned
+            9: -1,   # chair → unassigned
+            10: -1,  # sofa → unassigned
+            11: -1,  # bookcase → unassigned
+            12: -1,  # board → unassigned
+            13: -1   # clutter → unassigned
         }
         # Efficient remapping
         labels = np.vectorize(remap_dict.get)(labels)

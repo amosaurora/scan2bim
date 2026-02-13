@@ -61,7 +61,6 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
             # We use the same loss function as training (or a standard one)
             l = criterion(o, y)
             val_loss += l.item()
-            # --------------------------------------
 
             metric.add_sample(o.argmax(dim=1).flatten(), y.flatten())
             
@@ -96,7 +95,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", type=int, default=4, help='batch_size')
     parser.add_argument("--cube_edge", type=int, default=96, help='granularity of voxelization train')
     parser.add_argument("--val_cube_edge", type=int, default=96, help='granularity of voxelization val')
-    parser.add_argument("--num_classes", type=int, default=8, help='number of classes to consider')
+    parser.add_argument("--num_classes", type=int, default=7, help='number of classes to consider')
     parser.add_argument("--dset_path", type=str, default="/media/elena/M2SSD/datasets/HePIC/HePIC", help='dataset path')
     parser.add_argument("--test_name", type=str, default='test', help='optional test name')
     parser.add_argument("--pretrain", type=str, help='pretrained model path')
