@@ -24,13 +24,8 @@ from matplotlib.colors import to_rgb
 import argparse
 
 def load_point_cloud(file_path):
-    """
-    Load point cloud from file.
-    Supports: .ply, .pcd, .xyz, .las formats
-    """
     print(f"Loading point cloud from: {file_path}")
     
-    # Open3D can read .ply and .pcd directly
     if file_path.suffix in ['.ply', '.pcd']:
         pcd = o3d.io.read_point_cloud(str(file_path))
     else:
@@ -39,7 +34,6 @@ def load_point_cloud(file_path):
     print(f"Loaded {len(pcd.points)} points")
     return pcd
 
-# Map label IDs -> semantic names (match your training setup)
 ID_TO_NAME = {
     0: "ceiling",
     1: "floor",
@@ -52,9 +46,6 @@ ID_TO_NAME = {
 }
 
 def separate_by_label(pcd, point_labels):
-    """
-    Split point cloud into semantic classes using integer labels, not colors.
-    """
     points = np.asarray(pcd.points)
     colors = np.asarray(pcd.colors)
 
@@ -74,32 +65,21 @@ def separate_by_label(pcd, point_labels):
     return separated
 
 def smooth_labels_knn(pcd, labels, k=5):
-    """
-    Replaces each point's label with the majority label of its k-nearest neighbors.
-    Removes 'salt-and-pepper' noise.
-    """
     print(f"Smoothing labels with KNN (k={k})...")
     points = np.asarray(pcd.points)
-    
-    # 1. Build Neighbor Tree
-    # n_jobs=-1 uses all CPU cores for speed
+
     nbrs = NearestNeighbors(n_neighbors=k, algorithm='kd_tree', n_jobs=-1).fit(points)
     distances, indices = nbrs.kneighbors(points)
     
-    # 2. Vote
     new_labels = np.zeros_like(labels)
     
-    # Vectorized voting (faster than loop)
-    neighbor_labels = labels[indices] # Shape [N, k]
+    neighbor_labels = labels[indices] 
     
-    # Use scipy mode if available, else simple loop
     from scipy.stats import mode
     try:
-        # mode returns (values, counts)
         vote_result = mode(neighbor_labels, axis=1, keepdims=False)
         new_labels = vote_result[0]
     except:
-        # Fallback if scipy version differs
         for i in tqdm(range(len(labels)), desc="Voting"):
             counts = np.bincount(neighbor_labels[i])
             new_labels[i] = np.argmax(counts)
@@ -107,9 +87,6 @@ def smooth_labels_knn(pcd, labels, k=5):
     return new_labels
 
 def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
-    """
-    Use DBSCAN clustering to identify individual instances within a class.
-    """
     if len(pcd.points) == 0:
         return []
     
@@ -118,7 +95,6 @@ def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     
     print(f"\nClustering {class_name} with DBSCAN...")
     
-    # Perform DBSCAN clustering
     clustering = DBSCAN(eps=eps, min_samples=min_points, n_jobs=-1).fit(points)
     labels = clustering.labels_
     
@@ -129,7 +105,7 @@ def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     
     instances = []
     for label_id in unique_labels:
-        if label_id == -1:  # Skip noise points
+        if label_id == -1:
             continue
         
         instance_mask = labels == label_id
@@ -145,9 +121,6 @@ def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     return instances
 
 def filter_small_instances(instances_dict, min_points_thresholds):
-    """
-    Removes instances that are too small to be real BIM objects.
-    """
     cleaned_dict = {}
     print("\n--- CLEANING NOISE ---")
     
