@@ -30,8 +30,8 @@ import argparse
 DATA_PATH = "O:/data/S3DIS"  # Change to your actual folder path
 
 # Keywords to identify file types
-SYNTH_KEYWORD = "synth"     # e.g., "synth_room_001.ply"
-CUSTOM_KEYWORD = "Classified"   # e.g., "custom_office_scan.ply"
+SYNTH_KEYWORD = "synth_"     # e.g., "synth_room_001.ply"
+CUSTOM_KEYWORD = "classified"   # e.g., "custom_office_scan.ply"
 S3DIS_PREFIX = "Area_"      # e.g., "Area_1_conferenceRoom_1.ply"
 
 # How much to repeat them?
@@ -65,16 +65,23 @@ def main():
     print(f"  - Custom Files: {len(custom_files)}")
     if others:
         print(f"  - Unclassified Files: {len(others)} (Check naming!)")
+        print(f"    Example: {others[:3]}")
 
     # 3. Create Train/Test Split (Only split S3DIS)
     # We put ALL synthetic and custom files into TRAIN.
     # We reserve 10% of S3DIS for testing.
     random.shuffle(s3dis_files)
-    split_idx = int(len(s3dis_files) * 0.8)
     
-    train_s3dis = s3dis_files[:split_idx]
-    val_s3dis = s3dis_files[split_idx:int(len(s3dis_files)*0.9)]
-    test_s3dis = s3dis_files[split_idx:]
+    n_total = len(s3dis_files)
+    idx_80 = int(n_total * 0.8)
+    idx_90 = int(n_total * 0.9)
+    
+    # 0% to 80% -> Train
+    train_s3dis = s3dis_files[:idx_80]
+    # 80% to 90% -> Val
+    val_s3dis = s3dis_files[idx_80:idx_90]
+    # 90% to 100% -> Test
+    test_s3dis = s3dis_files[idx_90:]
 
     # 4. Generate Train List (With Oversampling)
     train_list = []

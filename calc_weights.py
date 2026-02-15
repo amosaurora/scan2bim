@@ -11,7 +11,7 @@ REPEAT_CUSTOM = 100   # Must match makelists.py
 
 # Keywords to match files
 SYNTH_KEYWORD = "synth"
-CUSTOM_KEYWORD = "Classified"
+CUSTOM_KEYWORD = "classified"
 S3DIS_PREFIX = "Area_"
 
 # Mapping: Original S3DIS (0-13) -> Training Classes (0-7)
@@ -23,13 +23,13 @@ REMAP_DICT = {
     4: 4,   # column
     5: 5,   # window
     6: 6,   # door
-    7: 7,   # unassigned
-    8: 7,   # table -> unassigned
-    9: 7,   # chair -> unassigned
-    10: 7,  # sofa -> unassigned
-    11: 7,  # bookcase -> unassigned
-    12: 7,  # board -> unassigned
-    13: 7   # clutter -> unassigned
+    7: -1,   # unassigned
+    8: -1,   # table -> unassigned
+    9: -1,   # chair -> unassigned
+    10: -1,  # sofa -> unassigned
+    11: -1,  # bookcase -> unassigned
+    12: -1,  # board -> unassigned
+    13: -1   # clutter -> unassigned
 }
 
 def get_class_counts(file_path):
@@ -55,20 +55,22 @@ def get_class_counts(file_path):
         # Handle labels outside 0-13 safely
         labels = np.clip(labels, 0, 13) 
         remapped = np.vectorize(REMAP_DICT.get)(labels)
+
+        valid_labels = remapped[remapped >= 0]
         
         # 3. Count
-        counts = np.bincount(remapped, minlength=8)
-        return counts[:8] # Ensure exactly 8 classes
+        counts = np.bincount(valid_labels, minlength=7)
+        return counts[:7] # Ensure exactly 7 classes
 
     except Exception as e:
         print(f"Error reading {file_path}: {e}")
-        return np.zeros(8, dtype=int)
+        return np.zeros(7, dtype=int)
 
 def main():
     ply_files = glob.glob(os.path.join(DATA_PATH, "*.ply"))
     print(f"Found {len(ply_files)} total files. Scanning labels...")
     
-    total_counts = np.zeros(8, dtype=np.int64)
+    total_counts = np.zeros(7, dtype=np.int64)
     
     # Iterate and sum up
     for f in tqdm(ply_files):

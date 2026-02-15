@@ -33,8 +33,9 @@ class S3DISDataset(Dataset):
                            [102,102,156], # beam
                            [190,153,153], # column
                            [153,153,153], # window
-                           [250,170, 30], # door
-                           [  0,  0,  0]], dtype=np.uint8) # unassigned
+                           [250,170, 30]], # door
+                        #    [  0,  0,  0]], dtype=np.uint8) # unassigned
+                        dtype=np.uint8)
         return cmap
 
     def init_idmap(self):
@@ -45,20 +46,20 @@ class S3DISDataset(Dataset):
                  4: 'column',
                  5: 'window',
                  6: 'door', 
-                 7: 'unassigned',
+                #  7: 'unassigned',
         }
         idmap = {v:k for k,v in idmap.items()}
         return idmap
         
     def init_weights(self):
         # pts = np.array( [3370714, 2856755, 4919229, 318158, 375640, 478001, 974733, 650464, 791496, 88727, 1284130, 229758, 2272837] , dtype=np.int32)
-        # pts = np.array([217074, 28422379, 117924669, 546463, 3995718, 11357051, 4960637, 41740453], dtype=np.int32)
-        pts = np.array([39747709, 67953014, 196984929, 546463, 3995718, 11357051, 4960637, 225335105], dtype=np.int32)
-        weights = 1/(pts[:7] + 1e-6)
+        pts = np.array([46378544, 74583849, 216401489, 2886463, 5405718, 12127051, 5926637], dtype=np.int32)
+        # pts = np.array([39747709, 67953014, 196984929, 546463, 3995718, 11357051, 4960637, 225335105], dtype=np.int32)
+        weights = 1/(pts + 1e-6)
         # change the pts to match the remapped labels
         # merged_pts = np.array([pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6], pts[7]+pts[8]+pts[9]+pts[10]+pts[11]+pts[12]])
         median_weight = np.median(weights)
-        weights = np.clip(weights, a_min=None, a_max=median_weight * 10)
+        weights = np.clip(weights, a_min=None, a_max=median_weight * 3.0)
         return weights
     
     # def init_weights(self):
@@ -102,6 +103,12 @@ class S3DISDataset(Dataset):
         data = PlyData.read(fname)
         xyz = np.array([data['vertex']['x'], data['vertex']['y'], data['vertex']['z']]).T #np.array([[x,y,z] for x,y,z,_,_,_,_ in data['vertex']])
         # lab = data['vertex'][['label']].astype(int)+1 #np.array([l for _,_,_,_,_,_,l in data['vertex']])
+        ranges = xyz.max(axis=0) - xyz.min(axis=0)
+        if ranges[1] > ranges[2] * 2.0: 
+             # Swap Y and Z to fix Y-up data
+            xyz = xyz[:, [0, 2, 1]] 
+            xyz[:, 2] *= -1
+
         if 'label' in data['vertex']:
             raw_lab = data['vertex']['label']
         elif 'scalar_label' in data['vertex']:

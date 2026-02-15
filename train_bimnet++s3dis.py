@@ -47,7 +47,9 @@ torch.manual_seed(seed)
 #     return miou, o, y
 
 def validate(writer, vset, vloader, epoch, model, device, criterion): 
-    metric = Metrics(vset.cnames[1:], device=device)
+    metric = Metrics(vset.cnames, device=device)
+    # metric = Metrics(vset.cnames[1:], device=device)
+
     model.eval()
     
     val_loss = 0.0  # Initialize loss accumulator
@@ -86,39 +88,39 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
     model.train()
     return miou, val_loss, o, y  # Return val_loss
 
-def load_and_prune_weights(model_7class, checkpoint_path_8class):
-    print(f"Loading 8-class weights from {checkpoint_path_8class}...")
-    state_8 = torch.load(checkpoint_path_8class)
-    state_7 = model_7class.state_dict()
+# def load_and_prune_weights(model_7class, checkpoint_path_8class):
+#     print(f"Loading 8-class weights from {checkpoint_path_8class}...")
+#     state_8 = torch.load(checkpoint_path_8class)
+#     state_7 = model_7class.state_dict()
     
-    for key in state_7:
-        if key in state_8:
-            if state_7[key].shape == state_8[key].shape:
-                state_7[key] = state_8[key]
-            else:
-                print(f"Pruning layer: {key} | Old: {state_8[key].shape} -> New: {state_7[key].shape}")
+#     for key in state_7:
+#         if key in state_8:
+#             if state_7[key].shape == state_8[key].shape:
+#                 state_7[key] = state_8[key]
+#             else:
+#                 print(f"Pruning layer: {key} | Old: {state_8[key].shape} -> New: {state_7[key].shape}")
                 
-                # CASE 1: Bias (1D Tensor) -> Slice Dim 0 only
-                if len(state_7[key].shape) == 1:
-                    state_7[key][:7] = state_8[key][:7]
+#                 # CASE 1: Bias (1D Tensor) -> Slice Dim 0 only
+#                 if len(state_7[key].shape) == 1:
+#                     state_7[key][:7] = state_8[key][:7]
                     
-                # CASE 2: Weights (Multi-Dim Tensor)
-                else:
-                    # Slice Dimension 0 (Output Channels)
-                    # We create a temporary slice first
-                    temp_slice = state_8[key][:7]
+#                 # CASE 2: Weights (Multi-Dim Tensor)
+#                 else:
+#                     # Slice Dimension 0 (Output Channels)
+#                     # We create a temporary slice first
+#                     temp_slice = state_8[key][:7]
                     
-                    # Check if Dimension 1 (Input Channels) also needs slicing
-                    if state_7[key].shape[1] < temp_slice.shape[1]:
-                        # Slice Dim 1 as well: [7, 8, ...] -> [7, 7, ...]
-                        state_7[key][:7, :7] = temp_slice[:, :7]
-                    else:
-                        # Only Dim 0 needed slicing
-                        state_7[key][:7] = temp_slice
+#                     # Check if Dimension 1 (Input Channels) also needs slicing
+#                     if state_7[key].shape[1] < temp_slice.shape[1]:
+#                         # Slice Dim 1 as well: [7, 8, ...] -> [7, 7, ...]
+#                         state_7[key][:7, :7] = temp_slice[:, :7]
+#                     else:
+#                         # Only Dim 0 needed slicing
+#                         state_7[key][:7] = temp_slice
 
-    model_7class.load_state_dict(state_7)
-    print("Surgery complete. Model ready for 7-class fine-tuning.")
-    return model_7class
+#     model_7class.load_state_dict(state_7)
+#     print("Surgery complete. Model ready for 7-class fine-tuning.")
+#     return model_7class
 
 
 
@@ -246,7 +248,8 @@ if __name__ == '__main__':
                     torch.save(model.state_dict(), logdir+"/val_best_loss.pth")
                     print(f"  Saved new best LOSS model: {best_val_loss:.4f}")
 
-                metrics = Metrics(dset.cnames[1:], device=device)
+                metrics = Metrics(dset.cnames, device=device)
+                # metrics = Metrics(dset.cnames[1:], device=device)
 
         if e == 5:
             print("Unfreezing encoder...")
