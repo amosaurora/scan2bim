@@ -23,6 +23,8 @@ from pathlib import Path
 from matplotlib.colors import to_rgb
 import argparse
 
+
+
 def load_point_cloud(file_path):
     print(f"Loading point cloud from: {file_path}")
     
@@ -436,11 +438,11 @@ def main(
     pcd, preds_volume, points_grid, point_labels = run_bimnet_inference(
         pcd, models, cube_edge=cube_edge, num_classes=num_classes, device=device
     )
-    print("\n[DEBUG] Visualizing RAW BIMNet output (Before Smoothing)...")
-        # This will open a window. You must close it for the script to continue.
-    o3d.visualization.draw_geometries([pcd], 
-                                    window_name="Raw BIMNet Prediction", 
-                                    width=1024, height=768)
+    # print("\n[DEBUG] Visualizing RAW BIMNet output (Before Smoothing)...")
+    #     # This will open a window. You must close it for the script to continue.
+    # o3d.visualization.draw_geometries([pcd], 
+    #                                 window_name="Raw BIMNet Prediction", 
+    #                                 width=1024, height=768)
 
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens

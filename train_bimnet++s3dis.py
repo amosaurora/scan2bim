@@ -54,7 +54,7 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
     
     with torch.no_grad():
         for x, y in tqdm(vloader, "Validating Epoch %d"%(epoch+1), total=len(vloader)): # changed len(vset) to len(vloader) for accuracy
-            x, y = x.to(device), y.to(device, dtype=torch.long)-1 
+            x, y = x.to(device), y.to(device, dtype=torch.long) 
             o = model(x)
             
             # --- NEW: Calculate Validation Loss ---
@@ -86,6 +86,40 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
     model.train()
     return miou, val_loss, o, y  # Return val_loss
 
+def load_and_prune_weights(model_7class, checkpoint_path_8class):
+    print(f"Loading 8-class weights from {checkpoint_path_8class}...")
+    state_8 = torch.load(checkpoint_path_8class)
+    state_7 = model_7class.state_dict()
+    
+    for key in state_7:
+        if key in state_8:
+            if state_7[key].shape == state_8[key].shape:
+                state_7[key] = state_8[key]
+            else:
+                print(f"Pruning layer: {key} | Old: {state_8[key].shape} -> New: {state_7[key].shape}")
+                
+                # CASE 1: Bias (1D Tensor) -> Slice Dim 0 only
+                if len(state_7[key].shape) == 1:
+                    state_7[key][:7] = state_8[key][:7]
+                    
+                # CASE 2: Weights (Multi-Dim Tensor)
+                else:
+                    # Slice Dimension 0 (Output Channels)
+                    # We create a temporary slice first
+                    temp_slice = state_8[key][:7]
+                    
+                    # Check if Dimension 1 (Input Channels) also needs slicing
+                    if state_7[key].shape[1] < temp_slice.shape[1]:
+                        # Slice Dim 1 as well: [7, 8, ...] -> [7, 7, ...]
+                        state_7[key][:7, :7] = temp_slice[:, :7]
+                    else:
+                        # Only Dim 0 needed slicing
+                        state_7[key][:7] = temp_slice
+
+    model_7class.load_state_dict(state_7)
+    print("Surgery complete. Model ready for 7-class fine-tuning.")
+    return model_7class
+
 
 
 if __name__ == '__main__':
@@ -115,6 +149,7 @@ if __name__ == '__main__':
     # Load model
     model = BIMNet(args.num_classes)
     if args.pretrain:
+        # model = load_and_prune_weights(model, args.pretrain)
         new = model.state_dict()
         old = torch.load(args.pretrain)
         for k in new:
@@ -230,7 +265,7 @@ if __name__ == '__main__':
             optim.param_groups[0]['lr'] = lr
             optim.zero_grad()
             
-            x, y = x.to(device), y.to(device, dtype=torch.long)-1 # shift indices 
+            x, y = x.to(device), y.to(device, dtype=torch.long) # shift indices 
             
             o = model(x)
             if args.loss == 'mixed':
