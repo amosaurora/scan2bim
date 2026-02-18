@@ -44,7 +44,7 @@ ID_TO_NAME = {
     4: "column",
     5: "window",
     6: "door",
-    7: "unassigned",
+    # 7: "unassigned",
 }
 
 def separate_by_label(pcd, point_labels):
@@ -278,17 +278,51 @@ def build_models(checkpoint_paths, device, num_classes=7):
         models.append(model)
     return models
 
+# def voxelize_points(points, cube_edge):
+#     points_centered = points - points.mean(axis=0)
+    
+#     max_val = np.abs(points_centered).max() + 1e-8
+#     points_norm = points_centered / max_val
+    
+#     points_shifted = points_norm + 1.0
+    
+#     scale_factor = cube_edge // 2
+#     points_grid = np.round(points_shifted * scale_factor).astype(np.int32)
+    
+#     points_grid = np.clip(points_grid, 0, cube_edge - 1)
+
+#     vox = np.zeros((1, cube_edge, cube_edge, cube_edge), dtype=np.float32)
+#     vox[0, points_grid[:, 0], points_grid[:, 1], points_grid[:, 2]] = 1.0
+
+#     return vox, points_grid
+
 def voxelize_points(points, cube_edge):
+    # --- UPDATED NORMALIZATION: DYNAMIC SCALING ---
+    # 1. Center X and Y
     points_centered = points - points.mean(axis=0)
     
-    max_val = np.abs(points_centered).max() + 1e-8
-    points_norm = points_centered / max_val
+    # 2. Anchor Z (Floor) to 0.0
+    points_centered[:, 2] -= points_centered[:, 2].min()
     
-    points_shifted = points_norm + 1.0
+    # 3. Dynamic Scaling (Fits any room size into the grid)
+    # Calculates max dimension to fit within [-1, 1] (span = 2.0)
+    # Uses 1.8 instead of 2.0 to leave ~10% padding
+    ranges = points_centered.max(axis=0) - points_centered.min(axis=0)
+    max_dim = ranges.max() + 1e-6
+    scale_factor = 1.8 / max_dim
     
-    scale_factor = cube_edge // 2
-    points_grid = np.round(points_shifted * scale_factor).astype(np.int32)
+    points_norm = points_centered * scale_factor
     
+    # 4. Shift Z to start at -0.9 (Bottom of grid + padding)
+    points_shifted = points_norm 
+    points_shifted[:, 2] -= 0.9 
+    
+    # 5. Map to Grid
+    # Map [-1, 1] -> [0, 2] -> [0, cube_edge]
+    points_shifted += 1.0 
+    points_grid = np.round(points_shifted * (cube_edge // 2)).astype(np.int32)
+    
+    # Clip to be safe
     points_grid = np.clip(points_grid, 0, cube_edge - 1)
 
     vox = np.zeros((1, cube_edge, cube_edge, cube_edge), dtype=np.float32)
@@ -438,16 +472,11 @@ def main(
     pcd, preds_volume, points_grid, point_labels = run_bimnet_inference(
         pcd, models, cube_edge=cube_edge, num_classes=num_classes, device=device
     )
-    # print("\n[DEBUG] Visualizing RAW BIMNet output (Before Smoothing)...")
-    #     # This will open a window. You must close it for the script to continue.
-    # o3d.visualization.draw_geometries([pcd], 
-    #                                 window_name="Raw BIMNet Prediction", 
-    #                                 width=1024, height=768)
 
     # --- NEW STEP: SMOOTH LABELS ---
     # Fixes salt-and-pepper noise before any separation happens
     print("\nStep 0.5: Smoothing predictions with KNN...")
-    point_labels = smooth_labels_knn(pcd, point_labels, k=10)
+    point_labels = smooth_labels_knn(pcd, point_labels, k=5)
     
     # if visualize_network_output:
     #     print("\nVisualizing BIMNet semantic prediction...")
@@ -472,13 +501,13 @@ def main(
         'column':    {'eps': 0.1, 'min_points': 125},
         'window':    {'eps': 0.05, 'min_points': 150},
         'door':      {'eps': 0.07, 'min_points': 200},
-        'unassigned': {'eps': 0.05, 'min_points': 50},
+        # 'unassigned': {'eps': 0.05, 'min_points': 50},
     }
 
     for class_name, class_pcd in separated_classes.items():
         if class_name in planar_classes:
             # UPDATED: Thresh 0.20 handles wavy walls
-            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.20)
+            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.05)
         else:
             params = dbscan_params.get(class_name, {'eps': 0.1, 'min_points': 100})
             instances = instantiate_with_dbscan(
@@ -491,14 +520,14 @@ def main(
 
     # UPDATED: Aggressive thresholds to delete ghost instances
     cleaning_thresholds = {
-        'ceiling': 3000, 
-        'floor': 3000,   
-        'wall': 1500,
-        'beam': 300,
-        'column': 300,
-        'door': 1000, 
-        'window': 300,
-        'unassigned': 100
+        'ceiling': 2000, 
+        'floor': 2000,   
+        'wall': 1000,
+        'beam': 500,
+        'column': 500,
+        'door': 500, 
+        'window': 200,
+        # 'unassigned': 100
     }
 
     all_instances = filter_small_instances(all_instances, cleaning_thresholds)
