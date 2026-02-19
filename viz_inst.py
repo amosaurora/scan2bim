@@ -400,9 +400,6 @@ def extract_bim_parameters(instances_dict):
     bim_data = []
     
     for class_name, pcd_list in instances_dict.items():
-        if class_name != "wall": 
-            continue 
-            
         for idx, pcd in enumerate(pcd_list):
             pts = np.asarray(pcd.points)
             if len(pts) < 50: continue
@@ -411,34 +408,49 @@ def extract_bim_parameters(instances_dict):
             z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
             height = z_max - z_min
             
-            # 2. Centerline (2D Projection on XY plane)
-            xy_pts = pts[:, :2]
-            from sklearn.decomposition import PCA
-            pca = PCA(n_components=2)
-            pca.fit(xy_pts)
-            
-            direction = pca.components_[0] 
-            center = xy_pts.mean(axis=0)
-            
-            projected = xy_pts @ direction
-            p_min, p_max = projected.min(), projected.max()
-            
-            start_pt = center + direction * (p_min - projected.mean())
-            end_pt = center + direction * (p_max - projected.mean())
-            
-            # 3. Thickness (Requires finding the parallel surface or assuming standard)
-            thickness = 0.2 
-            
-            bim_obj = {
-                "id": f"{class_name}_{idx}",
-                "type": class_name,
-                "height": float(height),
-                "thickness": float(thickness),
-                "geometry": {
-                    "start_x": float(start_pt[0]), "start_y": float(start_pt[1]), "start_z": float(z_min),
-                    "end_x": float(end_pt[0]), "end_y": float(end_pt[1]), "end_z": float(z_min)
+            if class_name in ["floor", "ceiling"]:
+                    # Floors/Ceilings are horizontal slabs. Centerlines don't make sense.
+                    # Use a bounding box approach instead.
+                    x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+                    y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
+                    
+                    bim_obj = {
+                        "id": f"{class_name}_{idx}",
+                        "type": class_name,
+                        "height": float(height), # Will be close to 0
+                        "thickness": 0.2, # Standard slab thickness
+                        "geometry": {
+                            "min_x": float(x_min), "min_y": float(y_min), "z_elev": float(z_min),
+                            "max_x": float(x_max), "max_y": float(y_max)
+                        }
+                    }
+            else:
+                # Vertical/Linear elements: Walls, Beams, Columns, Windows, Doors
+                xy_pts = pts[:, :2]
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=2)
+                pca.fit(xy_pts)
+                
+                direction = pca.components_[0] 
+                center = xy_pts.mean(axis=0)
+                
+                projected = xy_pts @ direction
+                p_min, p_max = projected.min(), projected.max()
+                
+                start_pt = center + direction * (p_min - projected.mean())
+                end_pt = center + direction * (p_max - projected.mean())
+                
+                bim_obj = {
+                    "id": f"{class_name}_{idx}",
+                    "type": class_name,
+                    "height": float(height),
+                    "thickness": 0.2, # Consider dynamically calculating this later
+                    "geometry": {
+                        "start_x": float(start_pt[0]), "start_y": float(start_pt[1]), "start_z": float(z_min),
+                        "end_x": float(end_pt[0]), "end_y": float(end_pt[1]), "end_z": float(z_min)
+                    }
                 }
-            }
+                    
             bim_data.append(bim_obj)
             
     return bim_data
