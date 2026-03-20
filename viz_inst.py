@@ -390,24 +390,28 @@ def extract_bim_parameters(instances_dict):
         for idx, pcd in enumerate(pcd_list):
             pts = np.asarray(pcd.points)
             if len(pts) < 50: continue
-
+            x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+            y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
             z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
             height = z_max - z_min
-            
-            if class_name in ["floor", "ceiling"]:
-                    x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
-                    y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
-                    
-                    bim_obj = {
+            thickness = 0.2
+            bim_obj = {
                         "id": f"{class_name}_{idx}",
                         "type": class_name,
                         "height": float(height), 
-                        "thickness": 0.2, 
+                        "thickness": float(thickness), 
                         "geometry": {
                             "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_min),
                             "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_min)
                         }
                     }
+
+            if class_name == "floor":
+                bim_obj["geometry"]["start_z"] = float(z_min)
+                bim_obj["geometry"]["end_z"] = float(z_min)
+            elif class_name == "ceiling":
+                bim_obj["geometry"]["start_z"] = float(z_min/2)
+                bim_obj["geometry"]["end_z"] = float(z_min/2)
             else:
                 xy_pts = pts[:, :2]
                 from sklearn.decomposition import PCA
@@ -423,16 +427,12 @@ def extract_bim_parameters(instances_dict):
                 start_pt = center + direction * (p_min - projected.mean())
                 end_pt = center + direction * (p_max - projected.mean())
                 
-                bim_obj = {
-                    "id": f"{class_name}_{idx}",
-                    "type": class_name,
-                    "height": float(height),
-                    "thickness": 0.2, 
-                    "geometry": {
-                        "start_x": float(start_pt[0]), "start_y": float(start_pt[1]), "start_z": float(z_min),
-                        "end_x": float(end_pt[0]), "end_y": float(end_pt[1]), "end_z": float(z_min)
-                    }
-                }
+                bim_obj["geometry"]["start_x"] = float(start_pt[0])
+                bim_obj["geometry"]["end_x"] = float(end_pt[0])
+                bim_obj["geometry"]["start_y"] = float(start_pt[1])
+                bim_obj["geometry"]["end_y"] = float(end_pt[1])
+                # bim_obj["geometry"]["start_z"] = float(z_min)
+                # bim_obj["geometry"]["end_z"] = float(z_min)
                     
             bim_data.append(bim_obj)
             
