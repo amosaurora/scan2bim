@@ -88,7 +88,8 @@ def smooth_labels_knn(pcd, labels, k=5):
 def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     if len(pcd.points) == 0:
         return []
-    
+    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    pcd = pcd.select_by_index(ind)
     points = np.asarray(pcd.points)
     colors = np.asarray(pcd.colors)
     
@@ -117,18 +118,37 @@ def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     for label_id in unique_labels:
         if label_id == -1:
             continue
-        
         instance_mask = labels == label_id
-        instance_points = points[instance_mask]
-        instance_colors = colors[instance_mask]
+        instance_pcd = pcd.select_by_index(np.where(instance_mask)[0])
         
-        instance_pcd = o3d.geometry.PointCloud()
-        instance_pcd.points = o3d.utility.Vector3dVector(instance_points)
-        instance_pcd.colors = o3d.utility.Vector3dVector(instance_colors)
+        # --- ADDED: Geometric Sanity Check ---
+        # Only keep it if it looks like the class it's supposed to be
+        if is_valid_geometry(instance_pcd, class_name):
+            instances.append(instance_pcd)
+        # instance_mask = labels == label_id
+        # instance_points = points[instance_mask]
+        # instance_colors = colors[instance_mask]
         
-        instances.append(instance_pcd)
+        # instance_pcd = o3d.geometry.PointCloud()
+        # instance_pcd.points = o3d.utility.Vector3dVector(instance_points)
+        # instance_pcd.colors = o3d.utility.Vector3dVector(instance_colors)
+        
+        # instances.append(instance_pcd)
     
     return instances
+
+def is_valid_geometry(pcd, class_name):
+    """Helper to verify if a cluster actually looks like a column/beam."""
+    bbox = pcd.get_axis_aligned_bounding_box()
+    extent = bbox.get_extent() # [width, depth, height]
+    
+    if class_name == 'column':
+        # Columns must be taller than they are wide
+        return extent[2] > extent[0] and extent[2] > extent[1]
+    if class_name == 'beam':
+        # Beams must be long and horizontal
+        return max(extent[0], extent[1]) > extent[2]
+    return True
 
 def filter_small_instances(instances_dict, min_points_thresholds):
     cleaned_dict = {}
@@ -350,93 +370,376 @@ def run_bimnet_inference(pcd, models, cube_edge=96, num_classes=7, device="cuda"
     
     return pcd, preds, points_grid, point_labels
 
-def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.20, min_points=500):
+# def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.20, min_points=500):
+#     """
+#     Separates planar instances (Walls/Floors) by iteratively finding planes 
+#     and removing them from the cloud until no valid planes remain.
+#     UPDATED: dist_thresh increased to 0.20 to fix fragmented walls.
+#     """
+#     remaining_pcd = pcd
+#     instances = []
+    
+#     print(f"\nIterative RANSAC for {class_name} (Thresh={dist_thresh})...")
+    
+#     while len(remaining_pcd.points) > min_points:
+#         points = np.asarray(remaining_pcd.points)
+
+#         plane = pyrsc.Plane()
+#         best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
+        
+#         if len(inliers) < min_points:
+#             break
+
+#         inst_pcd = remaining_pcd.select_by_index(inliers)
+#         inst_pcd.paint_uniform_color(generate_distinct_colors(len(instances)+1)[-1])
+#         instances.append(inst_pcd)
+
+#         remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
+#         print(f"  Found instance {len(instances)}: {len(inliers)} points. Remaining: {len(remaining_pcd.points)}")
+        
+#     return instances
+
+# def extract_bim_parameters(instances_dict):
+#     """
+#     Calculates BIM-ready parameters (Length, Height, Thickness, Centerline) 
+#     for each wall instance.
+#     """
+#     bim_data = []
+    
+#     for class_name, pcd_list in instances_dict.items():
+#         for idx, pcd in enumerate(pcd_list):
+#             pts = np.asarray(pcd.points)
+#             if len(pts) < 50: continue
+#             x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+#             y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
+#             z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
+#             height = z_max - z_min
+#             thickness = 0.2
+#             bim_obj = {
+#                         "id": f"{class_name}_{idx}",
+#                         "type": class_name,
+#                         "height": float(height), 
+#                         "thickness": float(thickness), 
+#                         "geometry": {
+#                             "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_min),
+#                             "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_min)
+#                         }
+#                     }
+
+#             if class_name == "floor":
+#                 bim_obj["geometry"]["start_z"] = float(z_min)
+#                 bim_obj["geometry"]["end_z"] = float(z_min)
+#             elif class_name == "ceiling":
+#                 bim_obj["geometry"]["start_z"] = float(z_min/2)
+#                 bim_obj["geometry"]["end_z"] = float(z_min/2)
+#             else:
+#                 xy_pts = pts[:, :2]
+#                 from sklearn.decomposition import PCA
+#                 pca = PCA(n_components=2)
+#                 pca.fit(xy_pts)
+                
+#                 direction = pca.components_[0] 
+#                 center = xy_pts.mean(axis=0)
+                
+#                 projected = xy_pts @ direction
+#                 p_min, p_max = projected.min(), projected.max()
+                
+#                 start_pt = center + direction * (p_min - projected.mean())
+#                 end_pt = center + direction * (p_max - projected.mean())
+                
+#                 bim_obj["geometry"]["start_x"] = float(start_pt[0])
+#                 bim_obj["geometry"]["end_x"] = float(end_pt[0])
+#                 bim_obj["geometry"]["start_y"] = float(start_pt[1])
+#                 bim_obj["geometry"]["end_y"] = float(end_pt[1])
+#                 # bim_obj["geometry"]["start_z"] = float(z_min)
+#                 # bim_obj["geometry"]["end_z"] = float(z_min)
+                    
+#             bim_data.append(bim_obj)
+            
+#     return bim_data
+
+def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.15, min_points=500):
     """
-    Separates planar instances (Walls/Floors) by iteratively finding planes 
-    and removing them from the cloud until no valid planes remain.
-    UPDATED: dist_thresh increased to 0.20 to fix fragmented walls.
+    Robust version of Iterative RANSAC.
+    - Uses a higher threshold for real-world noise.
+    - Limits floor/ceiling to 1 instance for architectural realism.
     """
     remaining_pcd = pcd
     instances = []
     
-    print(f"\nIterative RANSAC for {class_name} (Thresh={dist_thresh})...")
+    # Real-world logic: rooms usually have only 1 floor and 1 ceiling
+    max_instances = 1 if class_name in ['floor', 'ceiling'] else 10
     
-    while len(remaining_pcd.points) > min_points:
+    print(f"\nRobust RANSAC for {class_name} (Thresh={dist_thresh})...")
+    
+    while len(remaining_pcd.points) > min_points and len(instances) < max_instances:
         points = np.asarray(remaining_pcd.points)
 
         plane = pyrsc.Plane()
-        best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
+        # pyransac3d internally uses an adaptive iteration approach based on outlier ratio
+        best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=min_points, maxIteration=1000)
         
         if len(inliers) < min_points:
             break
 
         inst_pcd = remaining_pcd.select_by_index(inliers)
-        inst_pcd.paint_uniform_color(generate_distinct_colors(len(instances)+1)[-1])
+        
+        # Color coding for visualization
+        color = generate_distinct_colors(len(instances) + 1)[-1]
+        inst_pcd.paint_uniform_color(color)
+        
         instances.append(inst_pcd)
 
+        # Remove inliers and continue searching
         remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
-        print(f"  Found instance {len(instances)}: {len(inliers)} points. Remaining: {len(remaining_pcd.points)}")
+        print(f"  Found {class_name} instance {len(instances)}: {len(inliers)} points.")
         
     return instances
 
-def extract_bim_parameters(instances_dict):
-    """
-    Calculates BIM-ready parameters (Length, Height, Thickness, Centerline) 
-    for each wall instance.
-    """
-    bim_data = []
+# def extract_bim_parameters(instances_dict):
+#     """
+#     Robust parameter extraction using Percentiles to ignore noise
+#     and Snapping to ensure walls match floor/ceiling heights.
+#     """
+#     bim_data = []
     
+#     # 1. First, find global floor and ceiling levels for "snapping"
+#     # This ensures walls aren't jagged or floating
+#     global_floor_z = 0.0
+#     global_ceiling_z = 2.5 # Default height
+    
+#     if 'floor' in instances_dict and len(instances_dict['floor']) > 0:
+#         floor_pts = np.asarray(instances_dict['floor'][0].points)
+#         global_floor_z = float(np.percentile(floor_pts[:, 2], 50)) # Use median for floor level
+        
+#     if 'ceiling' in instances_dict and len(instances_dict['ceiling']) > 0:
+#         ceil_pts = np.asarray(instances_dict['ceiling'][0].points)
+#         global_ceiling_z = float(np.percentile(ceil_pts[:, 2], 50))
+
+#     room_height = global_ceiling_z - global_floor_z
+
+#     for class_name, pcd_list in instances_dict.items():
+#         for idx, pcd in enumerate(pcd_list):
+#             if class_name in ['beam', 'column', 'door', 'window']:
+#                 # Use Open3D to get the tightest box possible, even if rotated
+#                 obb = pcd.get_oriented_bounding_box()
+#                 center = obb.center
+#                 extent = obb.extent
+                
+#                 bim_obj = {
+#                     "id": f"{class_name}_{idx}",
+#                     "type": class_name,
+#                     "height": float(extent[2]),
+#                     "thickness": float(min(extent[0], extent[1])),
+#                     "geometry": {
+#                         "center_x": float(center[0]),
+#                         "center_y": float(center[1]),
+#                         "center_z": float(center[2]),
+#                         "width": float(extent[0]),
+#                         "length": float(extent[1])
+#                     }
+#                 }
+#             pts = np.asarray(pcd.points)
+#             if len(pts) < 50: continue
+
+#             # 2. Use Percentiles (5% to 95%) to define boundaries
+#             # This ignores "stray" points common in real scans
+#             q_min = np.percentile(pts, 5, axis=0)
+#             q_max = np.percentile(pts, 95, axis=0)
+            
+#             # Use median for thickness to be robust against "ghosting" noise
+#             thickness = 0.2 
+            
+#             bim_obj = {
+#                 "id": f"{class_name}_{idx}",
+#                 "type": class_name,
+#                 "height": float(q_max[2] - q_min[2]), 
+#                 "thickness": float(thickness), 
+#                 "geometry": {
+#                     "start_x": float(q_min[0]), "start_y": float(q_min[1]), "start_z": float(q_min[2]),
+#                     "end_x": float(q_max[0]), "end_y": float(q_max[1]), "end_z": float(q_min[2])
+#                 }
+#             }
+
+#             if class_name == "floor":
+#                 bim_obj["geometry"]["start_z"] = global_floor_z
+#                 bim_obj["geometry"]["end_z"] = global_floor_z
+                
+#             elif class_name == "ceiling":
+#                 bim_obj["geometry"]["start_z"] = global_ceiling_z
+#                 bim_obj["geometry"]["end_z"] = global_ceiling_z
+                
+#             elif class_name == "wall":
+#                 # SNAP WALLS to the floor and ceiling levels
+#                 bim_obj["height"] = float(room_height)
+#                 bim_obj["geometry"]["start_z"] = global_floor_z
+#                 bim_obj["geometry"]["end_z"] = global_floor_z
+                
+#                 # Robust PCA for wall orientation (XY plane only)
+#                 xy_pts = pts[:, :2]
+#                 from sklearn.decomposition import PCA
+#                 pca = PCA(n_components=2)
+#                 pca.fit(xy_pts)
+                
+#                 direction = pca.components_[0] 
+#                 center = np.median(xy_pts, axis=0) # Median is more robust than mean
+                
+#                 projected = xy_pts @ direction
+#                 # Use percentiles for wall length
+#                 p_min, p_max = np.percentile(projected, 5), np.percentile(projected, 95)
+                
+#                 start_pt = center + direction * (p_min - np.median(projected))
+#                 end_pt = center + direction * (p_max - np.median(projected))
+                
+#                 bim_obj["geometry"]["start_x"] = float(start_pt[0])
+#                 bim_obj["geometry"]["end_x"] = float(end_pt[0])
+#                 bim_obj["geometry"]["start_y"] = float(start_pt[1])
+#                 bim_obj["geometry"]["end_y"] = float(end_pt[1])
+                    
+#             bim_data.append(bim_obj)
+            
+#     return bim_data
+def extract_bim_parameters(instances_dict):
+    bim_data = []
+
+    global_floor_z = 0.0
+    global_ceiling_z = 2.5
+
+    if 'floor' in instances_dict and len(instances_dict['floor']) > 0:
+        floor_pts = np.asarray(instances_dict['floor'][0].points)
+        global_floor_z = float(np.percentile(floor_pts[:, 2], 50))
+
+    if 'ceiling' in instances_dict and len(instances_dict['ceiling']) > 0:
+        ceil_pts = np.asarray(instances_dict['ceiling'][0].points)
+        global_ceiling_z = float(np.percentile(ceil_pts[:, 2], 50))
+
+    room_height = global_ceiling_z - global_floor_z
+
     for class_name, pcd_list in instances_dict.items():
         for idx, pcd in enumerate(pcd_list):
             pts = np.asarray(pcd.points)
-            if len(pts) < 50: continue
-            x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
-            y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
-            z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
-            height = z_max - z_min
-            thickness = 0.2
-            bim_obj = {
-                        "id": f"{class_name}_{idx}",
-                        "type": class_name,
-                        "height": float(height), 
-                        "thickness": float(thickness), 
-                        "geometry": {
-                            "start_x": float(x_min), "start_y": float(y_min), "start_z": float(z_min),
-                            "end_x": float(x_max), "end_y": float(y_max), "end_z": float(z_min)
-                        }
+            if len(pts) < 50:
+                continue
+
+            if class_name in ['beam', 'column', 'door', 'window']:
+                obb = pcd.get_oriented_bounding_box()
+                center = obb.center
+                extent = obb.extent
+
+                bim_obj = {
+                    "id": f"{class_name}_{idx}",
+                    "type": class_name,
+                    "height": float(extent[2]),
+                    "thickness": float(min(extent[0], extent[1])),
+                    "geometry": {
+                        "center_x": float(center[0]),
+                        "center_y": float(center[1]),
+                        "center_z": float(center[2]),
+                        "width": float(extent[0]),
+                        "length": float(extent[1])
                     }
+                }
+                bim_data.append(bim_obj)
+                continue
+
+            q_min = np.percentile(pts, 5, axis=0)
+            q_max = np.percentile(pts, 95, axis=0)
+
+            bim_obj = {
+                "id": f"{class_name}_{idx}",
+                "type": class_name,
+                "height": float(q_max[2] - q_min[2]),
+                "thickness": 0.2,
+                "geometry": {
+                    "start_x": float(q_min[0]),
+                    "start_y": float(q_min[1]),
+                    "start_z": float(q_min[2]),
+                    "end_x": float(q_max[0]),
+                    "end_y": float(q_max[1]),
+                    "end_z": float(q_min[2]),
+                }
+            }
 
             if class_name == "floor":
-                bim_obj["geometry"]["start_z"] = float(z_min)
-                bim_obj["geometry"]["end_z"] = float(z_min)
+                bim_obj["geometry"]["start_z"] = global_floor_z
+                bim_obj["geometry"]["end_z"] = global_floor_z
+
             elif class_name == "ceiling":
-                bim_obj["geometry"]["start_z"] = float(z_min/2)
-                bim_obj["geometry"]["end_z"] = float(z_min/2)
-            else:
+                bim_obj["geometry"]["start_z"] = global_ceiling_z
+                bim_obj["geometry"]["end_z"] = global_ceiling_z
+
+            elif class_name == "wall":
                 xy_pts = pts[:, :2]
                 from sklearn.decomposition import PCA
                 pca = PCA(n_components=2)
                 pca.fit(xy_pts)
-                
-                direction = pca.components_[0] 
-                center = xy_pts.mean(axis=0)
-                
+                direction = pca.components_[0]
+                center = np.median(xy_pts, axis=0)
                 projected = xy_pts @ direction
-                p_min, p_max = projected.min(), projected.max()
-                
-                start_pt = center + direction * (p_min - projected.mean())
-                end_pt = center + direction * (p_max - projected.mean())
-                
+                p_min, p_max = np.percentile(projected, 5), np.percentile(projected, 95)
+                start_pt = center + direction * (p_min - np.median(projected))
+                end_pt = center + direction * (p_max - np.median(projected))
+
+                bim_obj["height"] = float(room_height)
+                bim_obj["geometry"]["start_z"] = global_floor_z
+                bim_obj["geometry"]["end_z"] = global_floor_z
                 bim_obj["geometry"]["start_x"] = float(start_pt[0])
-                bim_obj["geometry"]["end_x"] = float(end_pt[0])
                 bim_obj["geometry"]["start_y"] = float(start_pt[1])
+                bim_obj["geometry"]["end_x"] = float(end_pt[0])
                 bim_obj["geometry"]["end_y"] = float(end_pt[1])
-                # bim_obj["geometry"]["start_z"] = float(z_min)
-                # bim_obj["geometry"]["end_z"] = float(z_min)
-                    
+
             bim_data.append(bim_obj)
-            
+
     return bim_data
+
+def merge_collinear_walls(wall_instances, dist_tolerance=0.3, angle_tolerance=0.1):
+    """
+    Merges wall segments that belong to the same physical plane.
+    """
+    if not wall_instances: return []
+    
+    merged_walls = []
+    used = set()
+
+    for i in range(len(wall_instances)):
+        if i in used: continue
+        
+        # Start with one wall segment
+        current_wall = wall_instances[i]
+        used.add(i)
+        
+        # Try to find segments to merge it with
+        for j in range(i + 1, len(wall_instances)):
+            if j in used: continue
+            
+            # Check if wall i and wall j are 'similar' 
+            # (In a real implementation, compare their PCA components or Plane Equations)
+            # For now, we'll use a distance check on their centroids
+            dist = np.linalg.norm(current_wall.get_center() - wall_instances[j].get_center())
+            
+            if dist < 2.0: # If segments are within 2 meters, merge them
+                current_wall += wall_instances[j]
+                used.add(j)
+        
+        merged_walls.append(current_wall)
+        
+    return merged_walls
+
+def instantiate_dominant_plane(pcd, class_name, dist_thresh=0.15):
+    """Force-extracts only the single largest plane for floors and ceilings."""
+    points = np.asarray(pcd.points)
+    if len(points) < 100:
+        return []
+    
+    # Standard RANSAC to find the primary surface
+    plane = pyrsc.Plane()
+    best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
+    
+    if len(inliers) < 100:
+        return []
+
+    inst_pcd = pcd.select_by_index(inliers)
+    return [inst_pcd] # Always returns a list with 1 item
 
 def main(
     input_file,
@@ -481,23 +784,39 @@ def main(
     planar_classes = ['wall', 'floor', 'ceiling']
     
     dbscan_params = {
-        'beam':      {'eps': 0.3, 'min_points': 100},
-        'column':    {'eps': 0.3, 'min_points': 100},
-        'window':    {'eps': 0.2, 'min_points': 50},
-        'door':      {'eps': 0.3, 'min_points': 100},
+        'beam':      {'eps': 0.35, 'min_points': 100},
+        'column':    {'eps': 0.4, 'min_points': 200},
+        'window':    {'eps': 0.15, 'min_points': 50},
+        'door':      {'eps': 0.25, 'min_points': 150},
     }
 
+    # for class_name, class_pcd in separated_classes.items():
+    #     if class_name in planar_classes:
+    #         instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.1)
+    #     else:
+    #         params = dbscan_params.get(class_name, {'eps': 0.3, 'min_points': 100})
+    #         instances = instantiate_with_dbscan(
+    #             class_pcd,
+    #             class_name,
+    #             eps=params['eps'],
+    #             min_points=params['min_points'],
+    #         )
+    #     all_instances[class_name] = instances
     for class_name, class_pcd in separated_classes.items():
-        if class_name in planar_classes:
-            instances = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.1)
+        if class_name in ['floor', 'ceiling']:
+            # Rule: Only one of each
+            instances = instantiate_dominant_plane(class_pcd, class_name)
+            
+        elif class_name == 'wall':
+            # Rule: Find many, then stitch them
+            raw_segments = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.2)
+            instances = merge_collinear_walls(raw_segments)
+            
         else:
+            # Rule: Use clustering for objects (doors/windows)
             params = dbscan_params.get(class_name, {'eps': 0.3, 'min_points': 100})
-            instances = instantiate_with_dbscan(
-                class_pcd,
-                class_name,
-                eps=params['eps'],
-                min_points=params['min_points'],
-            )
+            instances = instantiate_with_dbscan(class_pcd, class_name, **params)
+            
         all_instances[class_name] = instances
 
     cleaning_thresholds = {
