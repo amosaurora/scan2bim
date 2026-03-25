@@ -569,17 +569,21 @@ def extract_bim_parameters(instances_dict):
                 obb = pcd.get_oriented_bounding_box()
                 center = obb.center
                 extent = obb.extent
+                half_extent = extent / 2.0
+                start = center - half_extent
+                end = center + half_extent
                 bim_obj = {
                     'id': f'{class_name}_{idx}',
                     'type': class_name,
                     'height': float(extent[2]),
                     'thickness': float(min(extent[0], extent[1])),
                     'geometry': {
-                        'center_x': float(center[0]),
-                        'center_y': float(center[1]),
-                        'center_z': float(center[2]),
-                        'width': float(extent[0]),
-                        'length': float(extent[1]),
+                        'start_x': float(start[0]),
+                        'start_y': float(start[1]),
+                        'start_z': float(start[2]),
+                        'end_x': float(end[0]),
+                        'end_y': float(end[1]),
+                        'end_z': float(end[2])
                     }
                 }
                 bim_data.append(bim_obj)
