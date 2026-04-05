@@ -24,8 +24,6 @@ from pathlib import Path
 from matplotlib.colors import to_rgb
 import argparse
 
-import os
-print("RUNNING:", os.path.abspath(__file__))
 
 ID_TO_NAME = {
     0: "ceiling",
@@ -235,7 +233,6 @@ def estimate_scene_scale_factor(separated_classes, target_room_height=2.7, canon
     floor_pcd = separated_classes.get('floor')
     ceiling_pcd = separated_classes.get('ceiling')
     if floor_pcd is None or ceiling_pcd is None or len(floor_pcd.points) == 0 or len(ceiling_pcd.points) == 0:
-        print("Scale normalization skipped: missing floor or ceiling semantic points.")
         return 1.0, None
 
     floor_pts = np.asarray(floor_pcd.points, dtype=np.float32)
@@ -244,19 +241,13 @@ def estimate_scene_scale_factor(separated_classes, target_room_height=2.7, canon
     ceiling_z = float(np.percentile(ceiling_pts[:, 2], 50))
     estimated_height = abs(ceiling_z - floor_z)
     if estimated_height < 1e-6:
-        print("Scale normalization skipped: estimated room height is too small.")
         return 1.0, None
 
     low, high = canonical_height_range
     if low <= estimated_height <= high:
-        print(f"Scale normalization skipped: estimated room height {estimated_height:.3f} m is already in the expected range.")
         return 1.0, estimated_height
 
     scale_factor = target_room_height / estimated_height
-    print(
-        f"Applying scene scale normalization: estimated room height {estimated_height:.3f} m, "
-        f"target {target_room_height:.3f} m, scale_factor={scale_factor:.3f}"
-    )
     return scale_factor, estimated_height
 
 def smooth_labels_knn(pcd, labels, k=5, protected_classes=None):
@@ -676,13 +667,11 @@ def instantiate_oriented_planes(
 
         if orientation == 'vertical' and normal_z > normal_z_max_for_vertical:
             skipped_wrong_orientation += 1
-            print(f"  Skipping non-vertical plane with {len(inliers)} points (|nz|={normal_z:.3f}).")
             remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
             continue
 
         if orientation == 'horizontal' and normal_z < normal_z_min_for_horizontal:
             skipped_wrong_orientation += 1
-            print(f"  Skipping non-horizontal plane with {len(inliers)} points (|nz|={normal_z:.3f}).")
             remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
             continue
 
@@ -690,7 +679,6 @@ def instantiate_oriented_planes(
         is_valid, reason = explain_planar_instance(inst_pcd, class_name)
         if not is_valid:
             rejected_count += 1
-            print(f"  Rejected {class_name} plane with {len(inliers)} points due to geometry checks ({reason}).")
             remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
             continue
 
@@ -700,14 +688,6 @@ def instantiate_oriented_planes(
 
         remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
         print(f"  Found {class_name} instance {len(instances)}: {len(inliers)} points.")
-
-    if not instances and skipped_wrong_orientation:
-        print(
-            f"  No valid {class_name} instances found after skipping {skipped_wrong_orientation} "
-            f"wrong-orientation plane(s); {len(remaining_pcd.points)} points remained."
-        )
-    if not instances and rejected_count:
-        print(f"  No valid {class_name} instances kept; rejected {rejected_count} plane(s) by geometry checks.")
 
     return instances
 
@@ -1124,17 +1104,10 @@ def refine_instances_with_context(instances, class_name, instances_dict, scale_f
     context['scale_factor'] = scale_factor
     context['scene_mode'] = infer_scene_mode(context, scale_factor=scale_factor)
     kept = []
-    removed = 0
-    for idx, instance in enumerate(instances):
+    for instance in instances:
         valid, reason = explain_contextual_instance(instance, class_name, context)
         if valid:
             kept.append(instance)
-        else:
-            removed += 1
-            print(f"  Rejected {class_name} instance {idx} by context checks ({reason})")
-
-    if removed:
-        print(f"  Retained {len(kept)} {class_name} instance(s) after context filtering")
     return kept
 
 def instantiate_dominant_plane(pcd, class_name, dist_thresh=0.12):
@@ -1336,10 +1309,6 @@ def main(
                 vertical_normal_z_max=0.35
             )
             print(f"  Wall recovery source has {len(wall_source.points)} structural candidate points")
-            # debug_wall_source_path = Path(output_dir) / "debug_wall_source_before_ransac.ply"
-            # debug_wall_source_path.parent.mkdir(parents=True, exist_ok=True)
-            # o3d.io.write_point_cloud(str(debug_wall_source_path), wall_source)
-            # print(f"  Saved wall recovery debug cloud to {debug_wall_source_path}")
             raw_segments = instantiate_oriented_planes(
                 wall_source,
                 class_name,
