@@ -309,11 +309,13 @@ class S3DISDataset(Dataset):
                  splits_path="../Scan-to-BIM",
                  split="train",
                  cube_edge=96,
-                 augment=True):
+                 augment=True,
+                 dilate_labels=True):
 
         self.root_path = root_path
         self.cube_edge = cube_edge
         self.augment = augment
+        self.dilate_labels = dilate_labels
 
         self.cmap = self.init_cmap()
         self.idmap = self.init_idmap()
@@ -507,45 +509,31 @@ class S3DISDataset(Dataset):
             geom[tuple(xyz.T)] = 1
             labs[tuple(xyz.T)] = lab
         
-            # --- NEW: ROBUST DILATION (THICKENING) ---
-            # Classes to thicken: Floor(1), Wall(2), Beam(3), Col(4), Win(5), Door(6)
-            # We do NOT thicken Ceiling(0) as it is already dominant.
-            target_classes = [1, 2, 3, 4, 5, 6] 
-            
-            # Find indices where we have valid data (excluding ceiling/clutter)
-            # This is faster than looping through every single voxel
-            valid_indices = np.where(np.isin(labs, target_classes))
-            
-            if len(valid_indices[0]) > 0:
-                vx, vy, vz = valid_indices
+            if self.dilate_labels:
+                target_classes = [1, 2, 3, 4, 5, 6] 
+                valid_indices = np.where(np.isin(labs, target_classes))
                 
-                # Create neighbor offsets (6-connectivity)
-                offsets = [
-                    (1, 0, 0), (-1, 0, 0),
-                    (0, 1, 0), (0, -1, 0),
-                    (0, 0, 1), (0, 0, -1)
-                ]
-                
-                for dx, dy, dz in offsets:
-                    # Shift indices
-                    nx = np.clip(vx + dx, 0, self.cube_edge-1)
-                    ny = np.clip(vy + dy, 0, self.cube_edge-1)
-                    nz = np.clip(vz + dz, 0, self.cube_edge-1)
+                if len(valid_indices[0]) > 0:
+                    vx, vy, vz = valid_indices
+                    offsets = [
+                        (1, 0, 0), (-1, 0, 0),
+                        (0, 1, 0), (0, -1, 0),
+                        (0, 0, 1), (0, 0, -1)
+                    ]
                     
-                    # Identify empty neighbors (Intensity == 0)
-                    # We only write into empty air. We never overwrite existing geometry.
-                    mask_empty = (geom[nx, ny, nz] == 0)
-                    
-                    if np.any(mask_empty):
-                        # Apply Dilation
-                        fill_x = nx[mask_empty]
-                        fill_y = ny[mask_empty]
-                        fill_z = nz[mask_empty]
+                    for dx, dy, dz in offsets:
+                        nx = np.clip(vx + dx, 0, self.cube_edge-1)
+                        ny = np.clip(vy + dy, 0, self.cube_edge-1)
+                        nz = np.clip(vz + dz, 0, self.cube_edge-1)
+                        mask_empty = (geom[nx, ny, nz] == 0)
                         
-                        # Copy label from the source voxel
-                        source_labels = labs[vx, vy, vz]
-                        
-                        geom[fill_x, fill_y, fill_z] = 1.0
-                        labs[fill_x, fill_y, fill_z] = source_labels[mask_empty]
+                        if np.any(mask_empty):
+                            fill_x = nx[mask_empty]
+                            fill_y = ny[mask_empty]
+                            fill_z = nz[mask_empty]
+                            source_labels = labs[vx, vy, vz]
+                            
+                            geom[fill_x, fill_y, fill_z] = 1.0
+                            labs[fill_x, fill_y, fill_z] = source_labels[mask_empty]
 
         return torch.from_numpy(geom).unsqueeze(0), torch.from_numpy(labs)

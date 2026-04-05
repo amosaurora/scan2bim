@@ -1,6 +1,6 @@
 import numpy as np
 import open3d as o3d
-import open3d.visualization.gui as gui
+# import open3d.visualization.gui as gui
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pyransac3d as pyrsc
@@ -24,6 +24,9 @@ from pathlib import Path
 from matplotlib.colors import to_rgb
 import argparse
 
+import os
+print("RUNNING:", os.path.abspath(__file__))
+
 ID_TO_NAME = {
     0: "ceiling",
     1: "floor",
@@ -45,6 +48,147 @@ def load_point_cloud(file_path):
     print(f"Loaded {len(pcd.points)} points")
     return pcd
 
+def rotation_matrix_from_vectors(source, target):
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    source /= np.linalg.norm(source) + 1e-12
+    target /= np.linalg.norm(target) + 1e-12
+
+    v = np.cross(source, target)
+    c = np.clip(np.dot(source, target), -1.0, 1.0)
+    s = np.linalg.norm(v)
+
+    if s < 1e-8:
+        if c > 0:
+            return np.eye(3, dtype=np.float64)
+        # 180-degree flip around any axis orthogonal to source
+        ortho = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        if abs(source[0]) > 0.9:
+            ortho = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        axis = np.cross(source, ortho)
+        axis /= np.linalg.norm(axis) + 1e-12
+        K = np.array([
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ])
+        return np.eye(3, dtype=np.float64) + 2.0 * (K @ K)
+
+    K = np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+    ])
+    return np.eye(3, dtype=np.float64) + K + K @ K * ((1.0 - c) / (s ** 2))
+
+def align_point_cloud_z_up(pcd, distance_threshold=0.05):
+    if len(pcd.points) < 100:
+        return pcd, False
+
+    sample_pcd = pcd
+    if len(pcd.points) > 100000:
+        sample_pcd = pcd.voxel_down_sample(voxel_size=0.03)
+        if len(sample_pcd.points) < 100:
+            sample_pcd = pcd
+
+    try:
+        plane_model, inliers = sample_pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=3,
+            num_iterations=1500,
+        )
+    except Exception as exc:
+        print(f"Z-up alignment skipped: plane estimation failed ({exc}).")
+        return pcd, False
+
+    if len(inliers) < 100:
+        print("Z-up alignment skipped: no dominant plane found.")
+        return pcd, False
+
+    normal = np.asarray(plane_model[:3], dtype=np.float64)
+    normal /= np.linalg.norm(normal) + 1e-12
+    if normal[2] < 0:
+        normal = -normal
+
+    target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    tilt_deg = float(np.degrees(np.arccos(np.clip(np.dot(normal, target), -1.0, 1.0))))
+    if tilt_deg < 2.0:
+        print(f"Z-up alignment skipped: dominant plane already within {tilt_deg:.2f} deg of horizontal.")
+        return pcd, False
+
+    rotation = rotation_matrix_from_vectors(normal, target)
+    aligned = o3d.geometry.PointCloud(pcd)
+    center = np.asarray(aligned.get_center(), dtype=np.float64)
+    aligned.rotate(rotation, center=center)
+    print(f"Applied Z-up alignment using dominant plane normal {normal.round(4)} (tilt={tilt_deg:.2f} deg).")
+    return aligned, True
+
+def estimate_point_spacing(pcd, sample_size=20000):
+    points = np.asarray(pcd.points, dtype=np.float32)
+    if len(points) < 2:
+        return 0.02
+
+    if len(points) > sample_size:
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(points), size=sample_size, replace=False)
+        sample = points[sample_idx]
+    else:
+        sample = points
+
+    nbrs = NearestNeighbors(n_neighbors=2, algorithm='kd_tree', n_jobs=-1).fit(points)
+    distances, _ = nbrs.kneighbors(sample)
+    spacing = float(np.median(distances[:, 1]))
+    return max(spacing, 1e-3)
+
+def auto_tune_parameters(pcd):
+    n_points = len(pcd.points)
+    bbox = pcd.get_axis_aligned_bounding_box()
+    extent = np.asarray(bbox.get_extent(), dtype=np.float32)
+    scene_scale = float(np.max(extent)) if extent.size else 0.0
+    spacing = estimate_point_spacing(pcd)
+
+    smoothing_k = 5 if n_points > 900000 else 7
+    wall_ransac_thresh = min(max(spacing * 2.0, 0.03), 0.15)
+    floor_ceiling_ransac_thresh = min(max(spacing * 1.5, 0.02), 0.12)
+
+    dbscan_params = {
+        'beam': {
+            'eps': min(max(spacing * 4.0, 0.08), 0.35),
+            'min_points': 60 if scene_scale < 20 else 80,
+        },
+        'column': {
+            'eps': min(max(spacing * 5.0, 0.10), 0.40),
+            'min_points': 90 if scene_scale < 20 else 120,
+        },
+        'window': {
+            'eps': min(max(spacing * 2.5, 0.05), 0.18),
+            'min_points': 20 if n_points < 500000 else 30,
+        },
+        'door': {
+            'eps': min(max(spacing * 3.5, 0.08), 0.30),
+            'min_points': 60 if n_points < 500000 else 80,
+        },
+    }
+
+    config = {
+        'spacing': spacing,
+        'smoothing_k': smoothing_k,
+        'wall_ransac_thresh': wall_ransac_thresh,
+        'floor_ceiling_ransac_thresh': floor_ceiling_ransac_thresh,
+        'dbscan_params': dbscan_params,
+    }
+
+    print("\nAuto-tuned parameters from input cloud:")
+    print(f"  points: {n_points}")
+    print(f"  estimated spacing: {spacing:.4f}")
+    print(f"  smoothing_k: {smoothing_k}")
+    print(f"  wall_ransac_thresh: {wall_ransac_thresh:.4f}")
+    print(f"  floor_ceiling_ransac_thresh: {floor_ceiling_ransac_thresh:.4f}")
+    for class_name, params in dbscan_params.items():
+        print(f"  DBSCAN {class_name}: eps={params['eps']:.4f}, min_points={params['min_points']}")
+
+    return config
+
 def separate_by_label(pcd, point_labels):
     points = np.asarray(pcd.points)
     colors = np.asarray(pcd.colors)
@@ -64,47 +208,175 @@ def separate_by_label(pcd, point_labels):
 
     return separated
 
+def combine_point_clouds(pcd_list):
+    combined = o3d.geometry.PointCloud()
+    for pcd in pcd_list:
+        if pcd is None or len(pcd.points) == 0:
+            continue
+        combined += pcd
+    return combined
+
+def scale_point_cloud(pcd, scale_factor, center=None):
+    if pcd is None or len(pcd.points) == 0 or abs(scale_factor - 1.0) < 1e-8:
+        return o3d.geometry.PointCloud(pcd) if pcd is not None else o3d.geometry.PointCloud()
+
+    scaled = o3d.geometry.PointCloud(pcd)
+    center = np.zeros(3, dtype=np.float64) if center is None else np.asarray(center, dtype=np.float64)
+    scaled.scale(float(scale_factor), center=center)
+    return scaled
+
+def scale_instances_dict(instances_dict, scale_factor, center=None):
+    scaled_dict = {}
+    for class_name, instances in instances_dict.items():
+        scaled_dict[class_name] = [scale_point_cloud(instance, scale_factor, center=center) for instance in instances]
+    return scaled_dict
+
+def estimate_scene_scale_factor(separated_classes, target_room_height=2.7, canonical_height_range=(1.8, 4.5)):
+    floor_pcd = separated_classes.get('floor')
+    ceiling_pcd = separated_classes.get('ceiling')
+    if floor_pcd is None or ceiling_pcd is None or len(floor_pcd.points) == 0 or len(ceiling_pcd.points) == 0:
+        print("Scale normalization skipped: missing floor or ceiling semantic points.")
+        return 1.0, None
+
+    floor_pts = np.asarray(floor_pcd.points, dtype=np.float32)
+    ceiling_pts = np.asarray(ceiling_pcd.points, dtype=np.float32)
+    floor_z = float(np.percentile(floor_pts[:, 2], 50))
+    ceiling_z = float(np.percentile(ceiling_pts[:, 2], 50))
+    estimated_height = abs(ceiling_z - floor_z)
+    if estimated_height < 1e-6:
+        print("Scale normalization skipped: estimated room height is too small.")
+        return 1.0, None
+
+    low, high = canonical_height_range
+    if low <= estimated_height <= high:
+        print(f"Scale normalization skipped: estimated room height {estimated_height:.3f} m is already in the expected range.")
+        return 1.0, estimated_height
+
+    scale_factor = target_room_height / estimated_height
+    print(
+        f"Applying scene scale normalization: estimated room height {estimated_height:.3f} m, "
+        f"target {target_room_height:.3f} m, scale_factor={scale_factor:.3f}"
+    )
+    return scale_factor, estimated_height
+
 def smooth_labels_knn(pcd, labels, k=5, protected_classes=None):
     """
     Majority-vote label smoothing with an option to protect large planar classes.
-    On real scans, aggressive smoothing can bleed wall labels into nearby clutter,
-    so ceiling/floor/wall are left unchanged by default.
+    On real scans, aggressive smoothing can bleed wall/column labels into nearby
+    clutter, so ceiling/floor/wall/column are left unchanged by default.
     """
-    protected_classes = {0, 1, 2} if protected_classes is None else set(protected_classes)
+    protected_classes = {0, 1, 2, 4} if protected_classes is None else set(protected_classes)
     print(f"Smoothing labels with KNN (k={k}, protected={sorted(protected_classes)})...")
-    points = np.asarray(pcd.points)
+    points = np.asarray(pcd.points, dtype=np.float32)
 
     nbrs = NearestNeighbors(n_neighbors=k, algorithm='kd_tree', n_jobs=-1).fit(points)
-    _, indices = nbrs.kneighbors(points)
-
-    neighbor_labels = labels[indices]
     new_labels = labels.copy()
+    chunk_size = 50000
 
     from scipy.stats import mode
     try:
-        vote_result = mode(neighbor_labels, axis=1, keepdims=False)
-        voted = np.asarray(vote_result[0]).reshape(-1)
         mask = ~np.isin(labels, list(protected_classes))
-        new_labels[mask] = voted[mask]
+        for start in tqdm(range(0, len(labels), chunk_size), desc="Smoothing"):
+            end = min(start + chunk_size, len(labels))
+            _, indices = nbrs.kneighbors(points[start:end])
+            neighbor_labels = labels[indices]
+            vote_result = mode(neighbor_labels, axis=1, keepdims=False)
+            voted = np.asarray(vote_result[0]).reshape(-1)
+            chunk_mask = mask[start:end]
+            new_labels[start:end][chunk_mask] = voted[chunk_mask]
     except Exception:
-        for i in tqdm(range(len(labels)), desc="Voting"):
-            if labels[i] in protected_classes:
-                continue
-            counts = np.bincount(neighbor_labels[i])
-            new_labels[i] = np.argmax(counts)
+        for start in tqdm(range(0, len(labels), chunk_size), desc="Voting"):
+            end = min(start + chunk_size, len(labels))
+            _, indices = nbrs.kneighbors(points[start:end])
+            neighbor_labels = labels[indices]
+            for offset, label in enumerate(labels[start:end]):
+                if label in protected_classes:
+                    continue
+                counts = np.bincount(neighbor_labels[offset], minlength=len(ID_TO_NAME))
+                new_labels[start + offset] = np.argmax(counts)
 
     return new_labels
+
+def instantiate_columns_fast(pcd, eps=0.1, min_points=100):
+    if len(pcd.points) == 0:
+        return []
+
+    _, ind = pcd.remove_statistical_outlier(nb_neighbors=12, std_ratio=2.5)
+    pcd = pcd.select_by_index(ind)
+    points = np.asarray(pcd.points, dtype=np.float32)
+    if len(points) == 0:
+        return []
+
+    cluster_source = pcd
+    voxel_size = max(eps * 0.4, 0.01)
+    if len(points) > 40000:
+        cluster_source = pcd.voxel_down_sample(voxel_size=voxel_size)
+
+    cluster_points = np.asarray(cluster_source.points, dtype=np.float32)
+    if len(cluster_points) == 0:
+        return []
+
+    xy_features = cluster_points[:, :2]
+    scaled_min_points = max(10, min_points // 3) if len(points) > len(cluster_points) else min_points
+
+    print(f"\nClustering column with fast DBSCAN in XY...")
+    clustering = DBSCAN(eps=eps, min_samples=scaled_min_points, n_jobs=-1).fit(xy_features)
+    cluster_labels = clustering.labels_
+
+    valid_cluster_ids = sorted(label for label in np.unique(cluster_labels) if label != -1)
+    print(f"  Found {len(valid_cluster_ids)} candidate column instances")
+    if not valid_cluster_ids:
+        return []
+
+    if len(points) > len(cluster_points):
+        original_xy = points[:, :2]
+        point_cluster_ids = np.full(len(points), -1, dtype=np.int32)
+        chunk_size = 50000
+        for label_id in valid_cluster_ids:
+            cluster_xy = xy_features[cluster_labels == label_id]
+            if len(cluster_xy) == 0:
+                continue
+
+            nbrs = NearestNeighbors(n_neighbors=1, algorithm='kd_tree', n_jobs=-1).fit(cluster_xy)
+            assign_radius = max(eps * 0.7, voxel_size * 1.5)
+
+            for start in range(0, len(points), chunk_size):
+                end = min(start + chunk_size, len(points))
+                chunk_xy = original_xy[start:end]
+                distances, _ = nbrs.kneighbors(chunk_xy)
+                within_mask = distances[:, 0] <= assign_radius
+
+                chunk_ids = point_cluster_ids[start:end]
+                chunk_ids[within_mask] = label_id
+                point_cluster_ids[start:end] = chunk_ids
+    else:
+        point_cluster_ids = cluster_labels
+
+    instances = []
+    for label_id in valid_cluster_ids:
+        instance_idx = np.where(point_cluster_ids == label_id)[0]
+        if len(instance_idx) < min_points:
+            continue
+        instance_pcd = pcd.select_by_index(instance_idx)
+        if is_valid_geometry(instance_pcd, 'column'):
+            instances.append(instance_pcd)
+
+    print(f"  Retained {len(instances)} valid column instances")
+    return instances
 
 def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
     if len(pcd.points) == 0:
         return []
-    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    if class_name == 'column':
+        return instantiate_columns_fast(pcd, eps=eps, min_points=min_points)
+
+    _, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     pcd = pcd.select_by_index(ind)
-    points = np.asarray(pcd.points)
-    colors = np.asarray(pcd.colors)
+    points = np.asarray(pcd.points, dtype=np.float32)
     
     print(f"\nClustering {class_name} with DBSCAN...")
-    clustering = DBSCAN(eps=eps, min_samples=min_points, n_jobs=-1).fit(points)
+    feature_points = points[:, :2] if class_name in {'door', 'window'} else points
+    clustering = DBSCAN(eps=eps, min_samples=min_points, n_jobs=-1).fit(feature_points)
     labels = clustering.labels_
     
     unique_labels = set(labels)
@@ -127,10 +399,20 @@ def instantiate_with_dbscan(pcd, class_name, eps=0.1, min_points=100):
 def is_valid_geometry(pcd, class_name):
     """Helper to verify if a cluster actually looks like a column/beam."""
     bbox = pcd.get_axis_aligned_bounding_box()
-    extent = bbox.get_extent()
+    extent = np.asarray(bbox.get_extent(), dtype=np.float32)
     
     if class_name == 'column':
-        return extent[2] > extent[0] and extent[2] > extent[1]
+        width_x, width_y, height = extent
+        footprint_max = max(width_x, width_y)
+        footprint_min = min(width_x, width_y)
+        footprint_area = width_x * width_y
+        return (
+            height > 1.5 and
+            height > footprint_max * 1.8 and
+            footprint_min > 0.05 and
+            footprint_max < 1.2 and
+            footprint_area < 1.0
+        )
     if class_name == 'beam':
         return max(extent[0], extent[1]) > extent[2]
     return True
@@ -344,33 +626,71 @@ def run_bimnet_inference(pcd, models, cube_edge=96, num_classes=7, device="cuda"
     
     return pcd, preds, points_grid, point_labels
 
-def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.12, min_points=500, max_instances=12):
-    """
-    Iterative RANSAC for planar classes with stronger geometric checks for walls.
-    """
+def instantiate_oriented_planes(
+    pcd,
+    class_name,
+    dist_thresh=0.12,
+    min_points=300,
+    max_instances=12,
+    orientation='vertical',
+    normal_z_max_for_vertical=0.25,
+    normal_z_min_for_horizontal=0.9,
+):
     if len(pcd.points) < min_points:
         return []
 
     remaining_pcd = pcd
     instances = []
-    print(f"\nRobust RANSAC for {class_name} (Thresh={dist_thresh})...")
+    rejected_count = 0
+    skipped_wrong_orientation = 0
+    print(f"\nOriented RANSAC for {class_name} (Thresh={dist_thresh}, orientation={orientation})...")
 
     while len(remaining_pcd.points) > min_points and len(instances) < max_instances:
-        points = np.asarray(remaining_pcd.points)
+        points = np.asarray(remaining_pcd.points, dtype=np.float32)
         if len(points) < min_points:
             break
 
-        plane = pyrsc.Plane()
+        segment_pcd = remaining_pcd
+        if len(points) > 80000:
+            voxel_size = max(dist_thresh * 0.6, 0.03)
+            segment_pcd = remaining_pcd.voxel_down_sample(voxel_size=voxel_size)
+            if len(segment_pcd.points) < min_points:
+                segment_pcd = remaining_pcd
+
         try:
-            best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=min_points, maxIteration=1000)
+            plane_model, _ = segment_pcd.segment_plane(
+                distance_threshold=dist_thresh,
+                ransac_n=3,
+                num_iterations=1500,
+            )
         except Exception:
             break
 
+        normal = np.asarray(plane_model[:3], dtype=np.float32)
+        normal_norm = np.linalg.norm(normal) + 1e-8
+        normal_z = abs(normal[2]) / normal_norm
+        distances = np.abs(points @ normal + plane_model[3]) / normal_norm
+        inliers = np.where(distances <= dist_thresh)[0]
         if len(inliers) < min_points:
             break
 
+        if orientation == 'vertical' and normal_z > normal_z_max_for_vertical:
+            skipped_wrong_orientation += 1
+            print(f"  Skipping non-vertical plane with {len(inliers)} points (|nz|={normal_z:.3f}).")
+            remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
+            continue
+
+        if orientation == 'horizontal' and normal_z < normal_z_min_for_horizontal:
+            skipped_wrong_orientation += 1
+            print(f"  Skipping non-horizontal plane with {len(inliers)} points (|nz|={normal_z:.3f}).")
+            remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
+            continue
+
         inst_pcd = remaining_pcd.select_by_index(inliers)
-        if not is_valid_planar_instance(inst_pcd, class_name):
+        is_valid, reason = explain_planar_instance(inst_pcd, class_name)
+        if not is_valid:
+            rejected_count += 1
+            print(f"  Rejected {class_name} plane with {len(inliers)} points due to geometry checks ({reason}).")
             remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
             continue
 
@@ -380,6 +700,14 @@ def instantiate_planar_iterative(pcd, class_name, dist_thresh=0.12, min_points=5
 
         remaining_pcd = remaining_pcd.select_by_index(inliers, invert=True)
         print(f"  Found {class_name} instance {len(instances)}: {len(inliers)} points.")
+
+    if not instances and skipped_wrong_orientation:
+        print(
+            f"  No valid {class_name} instances found after skipping {skipped_wrong_orientation} "
+            f"wrong-orientation plane(s); {len(remaining_pcd.points)} points remained."
+        )
+    if not instances and rejected_count:
+        print(f"  No valid {class_name} instances kept; rejected {rejected_count} plane(s) by geometry checks.")
 
     return instances
 
@@ -409,26 +737,34 @@ def oriented_line_from_wall_points(pts_xy):
     }
 
 def is_valid_planar_instance(pcd, class_name):
+    valid, _ = explain_planar_instance(pcd, class_name)
+    return valid
+
+def explain_planar_instance(pcd, class_name):
     pts = np.asarray(pcd.points)
     if len(pts) < 100:
-        return False
+        return False, "too_few_points"
 
     bbox = pcd.get_axis_aligned_bounding_box()
     extent = np.asarray(bbox.get_extent())
 
     if class_name == 'wall':
-        height = extent[2]
-        horizontal = max(extent[0], extent[1])
-        thickness = min(extent[0], extent[1])
+        xy = pts[:, :2]
+        line = oriented_line_from_wall_points(xy)
+        z_min = np.percentile(pts[:, 2], 5)
+        z_max = np.percentile(pts[:, 2], 95)
+        height = float(z_max - z_min)
+        horizontal = float(line['length'])
+        thickness = float(line['thickness'])
         if height < 1.5 or horizontal < 0.5:
-            return False
+            return False, f"height={height:.2f}, length={horizontal:.2f}"
         if thickness > 1.0:
-            return False
+            return False, f"thickness={thickness:.2f}"
     elif class_name in ['floor', 'ceiling']:
         if extent[2] > max(extent[0], extent[1]):
-            return False
+            return False, f"extent_z={extent[2]:.2f}"
 
-    return True
+    return True, "ok"
 
 def merge_collinear_walls(wall_instances, dist_tolerance=0.2, angle_tolerance_deg=8.0, gap_tolerance=0.6):
     """
@@ -521,23 +857,298 @@ def merge_collinear_walls(wall_instances, dist_tolerance=0.2, angle_tolerance_de
     print(f"  Merged {len(wall_instances)} wall segments into {len(merged)} walls")
     return merged
 
-def instantiate_dominant_plane(pcd, class_name, dist_thresh=0.12):
-    """Force-extract only the largest plausible floor/ceiling plane."""
-    points = np.asarray(pcd.points)
-    if len(points) < 100:
-        return []
+def remove_wall_like_points_from_columns(column_pcd, wall_instances):
+    if len(column_pcd.points) == 0 or not wall_instances:
+        return column_pcd
 
-    plane = pyrsc.Plane()
+    points = np.asarray(column_pcd.points, dtype=np.float32)
+    keep_mask = np.ones(len(points), dtype=bool)
+
+    for wall in wall_instances:
+        wall_pts = np.asarray(wall.points, dtype=np.float32)
+        if len(wall_pts) < 100:
+            continue
+
+        line = oriented_line_from_wall_points(wall_pts[:, :2])
+        wall_z_min = np.percentile(wall_pts[:, 2], 5)
+        wall_z_max = np.percentile(wall_pts[:, 2], 95)
+        normal = line['normal'] / (np.linalg.norm(line['normal']) + 1e-8)
+        rel_xy = points[:, :2] - line['center']
+        lateral_dist = np.abs(rel_xy @ normal)
+        z_overlap = (points[:, 2] >= wall_z_min - 0.10) & (points[:, 2] <= wall_z_max + 0.10)
+        # Be gentler here: columns commonly touch walls, so only remove points that are
+        # extremely close to the wall centerline.
+        near_wall = lateral_dist <= max(line['thickness'] * 0.6, 0.05)
+        keep_mask &= ~(z_overlap & near_wall)
+
+    filtered = column_pcd.select_by_index(np.where(keep_mask)[0])
+    removed = len(points) - len(filtered.points)
+    if removed > 0:
+        print(f"  Removed {removed} column-labelled points that hug recovered wall planes")
+    return filtered
+
+def fit_plane_model_from_instance(pcd):
+    points = np.asarray(pcd.points, dtype=np.float32)
+    if len(points) < 3:
+        return None
+
+    sample_pcd = pcd
+    if len(points) > 50000:
+        sample_pcd = pcd.voxel_down_sample(voxel_size=0.03)
+        if len(sample_pcd.points) < 3:
+            sample_pcd = pcd
+
     try:
-        best_eq, inliers = plane.fit(points, thresh=dist_thresh, minPoints=100, maxIteration=1000)
+        plane_model, _ = sample_pcd.segment_plane(
+            distance_threshold=0.05,
+            ransac_n=3,
+            num_iterations=1000,
+        )
+        return np.asarray(plane_model, dtype=np.float32)
     except Exception:
-        return []
+        return None
 
-    if len(inliers) < 100:
-        return []
+def remove_points_near_floor_ceiling(structural_pcd, floor_instances, ceiling_instances, margin=0.03):
+    if len(structural_pcd.points) == 0:
+        return structural_pcd
 
-    inst_pcd = pcd.select_by_index(inliers)
-    return [inst_pcd] if is_valid_planar_instance(inst_pcd, class_name) else []
+    points = np.asarray(structural_pcd.points, dtype=np.float32)
+    keep_mask = np.ones(len(points), dtype=bool)
+
+    if floor_instances:
+        floor_plane = fit_plane_model_from_instance(floor_instances[0])
+        if floor_plane is not None:
+            floor_normal = floor_plane[:3]
+            floor_norm = np.linalg.norm(floor_normal) + 1e-8
+            floor_dist = np.abs(points @ floor_normal + floor_plane[3]) / floor_norm
+            keep_mask &= floor_dist > margin
+    if ceiling_instances:
+        ceiling_plane = fit_plane_model_from_instance(ceiling_instances[0])
+        if ceiling_plane is not None:
+            ceiling_normal = ceiling_plane[:3]
+            ceiling_norm = np.linalg.norm(ceiling_normal) + 1e-8
+            ceiling_dist = np.abs(points @ ceiling_normal + ceiling_plane[3]) / ceiling_norm
+            keep_mask &= ceiling_dist > margin
+
+    filtered = structural_pcd.select_by_index(np.where(keep_mask)[0])
+    removed = len(points) - len(filtered.points)
+    if removed > 0:
+        print(f"  Removed {removed} structural points within {margin:.3f} m of floor/ceiling before wall recovery")
+    return filtered
+
+def retain_vertical_surface_points(pcd, radius=0.12, max_nn=30, vertical_normal_z_max=0.35):
+    if len(pcd.points) < 50:
+        return pcd
+
+    work_pcd = o3d.geometry.PointCloud(pcd)
+    work_pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
+    )
+    normals = np.asarray(work_pcd.normals, dtype=np.float32)
+    if len(normals) == 0:
+        return pcd
+
+    vertical_mask = np.abs(normals[:, 2]) <= vertical_normal_z_max
+    filtered = pcd.select_by_index(np.where(vertical_mask)[0])
+    removed = len(pcd.points) - len(filtered.points)
+    print(
+        f"  Retained {len(filtered.points)} vertical-surface points for wall recovery "
+        f"(removed {removed} by normal filtering)"
+    )
+    return filtered
+
+def remove_non_structural_labels_from_geometry(pcd, separated_classes):
+    if len(pcd.points) == 0:
+        return pcd
+
+    subtract_cloud = combine_point_clouds([
+        separated_classes.get('window'),
+        separated_classes.get('door'),
+    ])
+    if len(subtract_cloud.points) == 0:
+        return pcd
+
+    base_points = np.asarray(pcd.points, dtype=np.float32)
+    subtract_points = np.asarray(subtract_cloud.points, dtype=np.float32)
+    if len(subtract_points) == 0:
+        return pcd
+
+    nbrs = NearestNeighbors(n_neighbors=1, algorithm='kd_tree', n_jobs=-1).fit(subtract_points)
+    chunk_size = 50000
+    keep_mask = np.ones(len(base_points), dtype=bool)
+    removal_radius = 0.08
+
+    for start in range(0, len(base_points), chunk_size):
+        end = min(start + chunk_size, len(base_points))
+        distances, _ = nbrs.kneighbors(base_points[start:end])
+        keep_mask[start:end] &= distances[:, 0] > removal_radius
+
+    filtered = pcd.select_by_index(np.where(keep_mask)[0])
+    removed = len(base_points) - len(filtered.points)
+    if removed > 0:
+        print(f"  Removed {removed} raw points near door/window labels before wall recovery")
+    return filtered
+
+def build_scene_context(instances_dict):
+    floor_z = None
+    ceiling_z = None
+    room_height = None
+
+    if instances_dict.get('floor'):
+        floor_pts = np.asarray(instances_dict['floor'][0].points, dtype=np.float32)
+        if len(floor_pts) > 0:
+            floor_z = float(np.percentile(floor_pts[:, 2], 50))
+
+    if instances_dict.get('ceiling'):
+        ceiling_pts = np.asarray(instances_dict['ceiling'][0].points, dtype=np.float32)
+        if len(ceiling_pts) > 0:
+            ceiling_z = float(np.percentile(ceiling_pts[:, 2], 50))
+
+    if floor_z is not None and ceiling_z is not None:
+        room_height = max(ceiling_z - floor_z, 1e-6)
+
+    wall_lines = []
+    for wall in instances_dict.get('wall', []):
+        pts = np.asarray(wall.points, dtype=np.float32)
+        if len(pts) < 50:
+            continue
+        wall_lines.append(oriented_line_from_wall_points(pts[:, :2]))
+
+    return {
+        'floor_z': floor_z,
+        'ceiling_z': ceiling_z,
+        'room_height': room_height,
+        'wall_lines': wall_lines,
+    }
+
+def infer_scene_mode(context, scale_factor=1.0):
+    room_height = context.get('room_height')
+    wall_count = len(context.get('wall_lines', []))
+    if scale_factor > 2.5:
+        return 'synthetic_like'
+    if room_height is not None and room_height < 1.8:
+        return 'synthetic_like'
+    if wall_count >= 6:
+        return 'real_like'
+    return 'real_like'
+
+def distance_to_wall_lines_xy(point_xy, wall_lines):
+    if not wall_lines:
+        return None
+    dists = [abs(np.dot(point_xy - line['center'], line['normal'])) for line in wall_lines]
+    return float(min(dists)) if dists else None
+
+def explain_contextual_instance(pcd, class_name, context):
+    pts = np.asarray(pcd.points, dtype=np.float32)
+    if len(pts) < 20:
+        return False, "too_few_points"
+
+    floor_z = context.get('floor_z')
+    ceiling_z = context.get('ceiling_z')
+    room_height = context.get('room_height')
+    wall_lines = context.get('wall_lines', [])
+    scene_mode = context.get('scene_mode', 'real_like')
+
+    bbox = pcd.get_axis_aligned_bounding_box()
+    extent = np.asarray(bbox.get_extent(), dtype=np.float32)
+    width_x, width_y, height_aabb = extent
+    bottom = float(np.percentile(pts[:, 2], 5))
+    top = float(np.percentile(pts[:, 2], 95))
+    height = max(top - bottom, 1e-6)
+    center_xy = np.median(pts[:, :2], axis=0)
+    wall_dist = distance_to_wall_lines_xy(center_xy, wall_lines)
+
+    if room_height is None:
+        room_height = max(height, 1.0)
+
+    footprint_max = float(max(width_x, width_y))
+    footprint_min = float(min(width_x, width_y))
+    footprint_area = float(width_x * width_y)
+
+    if class_name == 'column':
+        min_height_ratio = 0.22 if scene_mode == 'synthetic_like' else 0.28
+        max_footprint_ratio = 0.75 if scene_mode == 'synthetic_like' else 0.65
+        max_area_ratio = 0.42 if scene_mode == 'synthetic_like' else 0.36
+        max_bottom_offset_ratio = 0.50 if scene_mode == 'synthetic_like' else 0.42
+        if height < room_height * min_height_ratio:
+            return False, f"height={height:.2f}"
+        if footprint_max > room_height * max_footprint_ratio:
+            return False, f"footprint_max={footprint_max:.2f}"
+        if footprint_area > (room_height * max_area_ratio) ** 2:
+            return False, f"footprint_area={footprint_area:.2f}"
+        if floor_z is not None and abs(bottom - floor_z) > room_height * max_bottom_offset_ratio:
+            return False, f"bottom_offset={abs(bottom - floor_z):.2f}"
+        return True, "ok"
+
+    if class_name == 'beam':
+        longest = float(max(extent))
+        smallest = float(min(extent))
+        mid = float(np.sort(extent)[1])
+        if longest < room_height * 0.25:
+            return False, f"length={longest:.2f}"
+        if smallest > room_height * 0.20:
+            return False, f"thickness={smallest:.2f}"
+        if ceiling_z is not None and top < ceiling_z - room_height * 0.35:
+            return False, f"top={top:.2f}"
+        if height_aabb > max(longest, mid):
+            return False, f"height_axis={height_aabb:.2f}"
+        return True, "ok"
+
+    if class_name == 'door':
+        if floor_z is not None and abs(bottom - floor_z) > room_height * 0.30:
+            return False, f"bottom_offset={abs(bottom - floor_z):.2f}"
+        if height < room_height * 0.18 or height > room_height * 1.10:
+            return False, f"height={height:.2f}"
+        if wall_dist is not None and wall_dist > room_height * 0.28:
+            return False, f"wall_dist={wall_dist:.2f}"
+        return True, "ok"
+
+    if class_name == 'window':
+        if floor_z is not None and bottom < floor_z + room_height * 0.05:
+            return False, f"sill={bottom - floor_z:.2f}"
+        if ceiling_z is not None and top > ceiling_z - room_height * 0.05:
+            return False, f"head_clearance={ceiling_z - top:.2f}"
+        if height < room_height * 0.08 or height > room_height * 0.80:
+            return False, f"height={height:.2f}"
+        if wall_dist is not None and wall_dist > room_height * 0.28:
+            return False, f"wall_dist={wall_dist:.2f}"
+        return True, "ok"
+
+    return True, "ok"
+
+def refine_instances_with_context(instances, class_name, instances_dict, scale_factor=1.0):
+    if not instances or class_name not in {'beam', 'column', 'door', 'window'}:
+        return instances
+
+    context = build_scene_context(instances_dict)
+    context['scale_factor'] = scale_factor
+    context['scene_mode'] = infer_scene_mode(context, scale_factor=scale_factor)
+    kept = []
+    removed = 0
+    for idx, instance in enumerate(instances):
+        valid, reason = explain_contextual_instance(instance, class_name, context)
+        if valid:
+            kept.append(instance)
+        else:
+            removed += 1
+            print(f"  Rejected {class_name} instance {idx} by context checks ({reason})")
+
+    if removed:
+        print(f"  Retained {len(kept)} {class_name} instance(s) after context filtering")
+    return kept
+
+def instantiate_dominant_plane(pcd, class_name, dist_thresh=0.12):
+    """Extract the dominant horizontal floor/ceiling plane only."""
+    instances = instantiate_oriented_planes(
+        pcd,
+        class_name,
+        dist_thresh=dist_thresh,
+        min_points=100,
+        max_instances=1,
+        orientation='horizontal',
+        normal_z_min_for_horizontal=0.9,
+    )
+    return instances[:1]
 
 def extract_bim_parameters(instances_dict):
     """
@@ -633,7 +1244,11 @@ def main(
     num_classes=7,
     device=None,
     visualize_network_output=False,
-    visualize_instances_flag=False
+    visualize_instances_flag=False,
+    smoothing_k=None,
+    wall_ransac_thresh=None,
+    floor_ceiling_ransac_thresh=None,
+    align_z_up=True
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_paths = checkpoint_paths 
@@ -644,6 +1259,16 @@ def main(
 
     input_path = Path(input_file)
     pcd = load_point_cloud(input_path)
+    if align_z_up:
+        pcd, _ = align_point_cloud_z_up(pcd)
+    auto_config = auto_tune_parameters(pcd)
+
+    if smoothing_k is None:
+        smoothing_k = auto_config['smoothing_k']
+    if wall_ransac_thresh is None:
+        wall_ransac_thresh = auto_config['wall_ransac_thresh']
+    if floor_ceiling_ransac_thresh is None:
+        floor_ceiling_ransac_thresh = auto_config['floor_ceiling_ransac_thresh']
 
     print("\nLoading BIMNet models...")
     models = build_models(checkpoint_paths, device, num_classes=num_classes)
@@ -653,7 +1278,7 @@ def main(
     )
 
     print("\nStep 0.5: Smoothing predictions with KNN...")
-    point_labels = smooth_labels_knn(pcd, point_labels, k=5)
+    point_labels = smooth_labels_knn(pcd, point_labels, k=smoothing_k)
     
     print("\nStep 1: Separating point cloud by semantic class...")
     separated_classes = separate_by_label(pcd, point_labels)
@@ -662,31 +1287,83 @@ def main(
         print("Warning: No classes found! Check your color mappings.")
         return None
 
+    scale_factor, estimated_room_height = estimate_scene_scale_factor(separated_classes)
+    instantiation_pcd = scale_point_cloud(pcd, scale_factor)
+    instantiation_classes = {
+        class_name: scale_point_cloud(class_pcd, scale_factor)
+        for class_name, class_pcd in separated_classes.items()
+    }
+
     print("\nStep 2: Instantiating classes...")
     all_instances = {}
 
-    dbscan_params = {
-        'beam':   {'eps': 0.35, 'min_points': 100},
-        'column': {'eps': 0.4,  'min_points': 200},
-        'window': {'eps': 0.15, 'min_points': 50},
-        'door':   {'eps': 0.25, 'min_points': 150},
-    }
+    if abs(scale_factor - 1.0) > 1e-8:
+        dbscan_params = {
+            class_name: {
+                'eps': params['eps'] * scale_factor,
+                'min_points': params['min_points'],
+            }
+            for class_name, params in auto_config['dbscan_params'].items()
+        }
+        wall_ransac_thresh = wall_ransac_thresh * scale_factor
+        floor_ceiling_ransac_thresh = floor_ceiling_ransac_thresh * scale_factor
+    else:
+        dbscan_params = auto_config['dbscan_params']
+    wall_instances = []
 
-    for class_name, class_pcd in separated_classes.items():
+    for class_name, class_pcd in instantiation_classes.items():
         if class_name in ['floor', 'ceiling']:
-            instances = instantiate_dominant_plane(class_pcd, class_name)
+            instances = instantiate_dominant_plane(
+                class_pcd, class_name, dist_thresh=floor_ceiling_ransac_thresh
+            )
         elif class_name == 'wall':
-            raw_segments = instantiate_planar_iterative(class_pcd, class_name, dist_thresh=0.12)
+            wall_source = o3d.geometry.PointCloud(instantiation_pcd)
+            wall_source = remove_non_structural_labels_from_geometry(wall_source, instantiation_classes)
+            wall_source = remove_points_near_floor_ceiling(
+                wall_source,
+                all_instances.get('floor', []),
+                all_instances.get('ceiling', []),
+                margin=max(0.025, wall_ransac_thresh * 0.4)
+            )
+            wall_source = retain_vertical_surface_points(
+                wall_source,
+                radius=max(0.08, wall_ransac_thresh * 1.5),
+                max_nn=40,
+                vertical_normal_z_max=0.35
+            )
+            print(f"  Wall recovery source has {len(wall_source.points)} structural candidate points")
+            # debug_wall_source_path = Path(output_dir) / "debug_wall_source_before_ransac.ply"
+            # debug_wall_source_path.parent.mkdir(parents=True, exist_ok=True)
+            # o3d.io.write_point_cloud(str(debug_wall_source_path), wall_source)
+            # print(f"  Saved wall recovery debug cloud to {debug_wall_source_path}")
+            raw_segments = instantiate_oriented_planes(
+                wall_source,
+                class_name,
+                dist_thresh=wall_ransac_thresh,
+                min_points=100,
+                max_instances=32,
+                orientation='vertical',
+                normal_z_max_for_vertical=0.25,
+            )
             instances = merge_collinear_walls(raw_segments)
+            wall_instances = instances
+        elif class_name == 'column':
+            params = dbscan_params.get(class_name, {'eps': 0.3, 'min_points': 100})
+            cleaned_column_pcd = remove_wall_like_points_from_columns(class_pcd, wall_instances)
+            instances = instantiate_with_dbscan(cleaned_column_pcd, class_name, **params)
+            instances = refine_instances_with_context(instances, class_name, all_instances, scale_factor=scale_factor)
         else:
             params = dbscan_params.get(class_name, {'eps': 0.3, 'min_points': 100})
             instances = instantiate_with_dbscan(class_pcd, class_name, **params)
+            instances = refine_instances_with_context(instances, class_name, all_instances, scale_factor=scale_factor)
             
         all_instances[class_name] = instances
 
+    ceiling_points = len(instantiation_classes.get('ceiling', o3d.geometry.PointCloud()).points)
+    floor_points = len(instantiation_classes.get('floor', o3d.geometry.PointCloud()).points)
     cleaning_thresholds = {
-        'ceiling': 2000,
-        'floor': 2000,
+        'ceiling': max(300, min(2000, int(ceiling_points * 0.05))) if ceiling_points > 0 else 300,
+        'floor': max(300, min(2000, int(floor_points * 0.05))) if floor_points > 0 else 300,
         'wall': 1000,
         'beam': 50,
         'column': 50,
@@ -695,19 +1372,20 @@ def main(
     }
 
     all_instances = filter_small_instances(all_instances, cleaning_thresholds)
+    output_instances = scale_instances_dict(all_instances, 1.0 / scale_factor) if abs(scale_factor - 1.0) > 1e-8 else all_instances
 
     print("\nStep 3: Extracting BIM Parameters and Saving...")
-    save_instances(all_instances, output_dir)
+    save_instances(output_instances, output_dir)
     
-    bim_json_data = extract_bim_parameters(all_instances)
+    bim_json_data = extract_bim_parameters(output_instances)
     with open(Path(output_dir) / "bim_reconstruction_data.json", "w") as f:
         json.dump(bim_json_data, f, indent=4)
     print(f"BIM parameters saved to {output_dir}/bim_reconstruction_data.json")
 
     if visualize_instances_flag:
-        visualize_summary(all_instances, separated_classes, pcd)
+        visualize_summary(output_instances, separated_classes, pcd)
 
-    return all_instances, separated_classes, pcd
+    return output_instances, separated_classes, pcd
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -721,6 +1399,10 @@ if __name__ == "__main__":
     parser.add_argument("--cpu", action="store_true", help="Force CPU")
     parser.add_argument("--vis-net", action="store_true", help="Visualize BIMNet output")
     parser.add_argument("--vis-instances", action="store_true", help="Visualize DBSCAN instances")
+    parser.add_argument("--smooth-k", type=int, default=None, help="K for KNN smoothing; auto-estimated if omitted")
+    parser.add_argument("--wall-ransac-thresh", type=float, default=None, help="RANSAC distance threshold for wall extraction; auto-estimated if omitted")
+    parser.add_argument("--floor-ceiling-ransac-thresh", type=float, default=None, help="RANSAC distance threshold for floor and ceiling extraction; auto-estimated if omitted")
+    parser.add_argument("--no-align-z-up", action="store_true", help="Skip rotating the dominant plane normal onto +Z before inference")
     
     args = parser.parse_args()
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -733,5 +1415,9 @@ if __name__ == "__main__":
         num_classes=args.num_classes,
         device=device,
         visualize_network_output=args.vis_net,
-        visualize_instances_flag=args.vis_instances
+        visualize_instances_flag=args.vis_instances,
+        smoothing_k=args.smooth_k,
+        wall_ransac_thresh=args.wall_ransac_thresh,
+        floor_ceiling_ransac_thresh=args.floor_ceiling_ransac_thresh,
+        align_z_up=not args.no_align_z_up
     )

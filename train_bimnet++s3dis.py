@@ -1,6 +1,7 @@
 import warnings
 warnings.filterwarnings("ignore", module="pydantic")
 import numpy as np
+import os
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from shutil import rmtree
@@ -48,7 +49,7 @@ torch.manual_seed(seed)
 #     model.train()
 #     return miou, o, y
 
-def validate(writer, vset, vloader, epoch, model, device, criterion): 
+def validate(writer, vset, vloader, epoch, model, device, criterion, prefix="Val"): 
     metric = Metrics(vset.cnames, device=device)
     # metric = Metrics(vset.cnames[1:], device=device)
 
@@ -76,13 +77,13 @@ def validate(writer, vset, vloader, epoch, model, device, criterion):
     prec = metric.percent_prec()
     
     # --- NEW: Log Validation Loss to TensorBoard ---
-    writer.add_scalar('Val/mIoU', miou, epoch)
-    writer.add_scalar('Val/Loss', val_loss, epoch) # <--- Track this!
-    writer.add_scalar('Val/Precision', prec, epoch)
-    writer.add_scalar('Val/Accuracy', acc, epoch)
+    writer.add_scalar(f'{prefix}/mIoU', miou, epoch)
+    writer.add_scalar(f'{prefix}/Loss', val_loss, epoch)
+    writer.add_scalar(f'{prefix}/Precision', prec, epoch)
+    writer.add_scalar(f'{prefix}/Accuracy', acc, epoch)
     # -----------------------------------------------
     
-    print(f"\nEpoch {epoch+1} Validation Results:")
+    print(f"\nEpoch {epoch+1} {prefix} Results:")
     print(f"  Loss: {val_loss:.4f}")
     print(f"  mIoU: {miou:.2f}%")
     print(metric)
@@ -103,13 +104,22 @@ if __name__ == '__main__':
     parser.add_argument("--test_name", type=str, default='test', help='optional test name')
     parser.add_argument("--pretrain", type=str, help='pretrained model path')
     parser.add_argument("--loss", choices=['ce','cwce','ohem','mixed'], default='mixed', type=str, help='which loss to use')
+    parser.add_argument("--splits_path", type=str, help='optional path containing train/val split txt files')
+    parser.add_argument("--finetune", action='store_true', help='use lower learning rate and more frequent validation for finetuning')
+    parser.add_argument("--finetune_lr", type=float, default=3e-6, help='starting learning rate for finetuning')
+    parser.add_argument("--dilate_labels", action='store_true', help='enable label dilation during training')
     args = parser.parse_args()
 
     lr0 = 1e-5
     lre = 1e-6
     eval_every_n_epochs = 10
+    if args.finetune:
+        lr0 = args.finetune_lr
+        lre = min(lre, args.finetune_lr * 0.1)
+        eval_every_n_epochs = 5
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    splits_path = args.splits_path if args.splits_path else args.dset_path
     
     logdir = "log/train_bimnet++" + "_" + args.test_name
     rmtree(logdir, ignore_errors=True)
@@ -132,8 +142,10 @@ if __name__ == '__main__':
     # Load dataset
     dataset = S3DISDataset
     dset = dataset(root_path=args.dset_path,
+                   splits_path=splits_path,
                    #fsl=50,
-                   cube_edge=args.cube_edge)
+                   cube_edge=args.cube_edge,
+                   dilate_labels=args.dilate_labels)
     dloader = DataLoader(dset,
                          batch_size=args.batch_size,
                          shuffle=True,
@@ -142,13 +154,31 @@ if __name__ == '__main__':
                          pin_memory=True)
 
     vset = dataset(root_path=args.dset_path,
+                   splits_path=splits_path,
                    cube_edge=args.val_cube_edge,
                    augment=False,
-                   split='val')
+                   split='val',
+                   dilate_labels=False)
     vloader = DataLoader(vset,
                          batch_size=1,
                          shuffle=False,
                          num_workers=4)
+
+    custom_val_path = os.path.join(splits_path, 'val_custom.txt')
+    if os.path.exists(custom_val_path):
+        vset_custom = dataset(root_path=args.dset_path,
+                              splits_path=splits_path,
+                              cube_edge=args.val_cube_edge,
+                              augment=False,
+                              split='val_custom',
+                              dilate_labels=False)
+        vloader_custom = DataLoader(vset_custom,
+                                    batch_size=1,
+                                    shuffle=False,
+                                    num_workers=4)
+    else:
+        vset_custom = None
+        vloader_custom = None
 
 
     # set up parameters for training
@@ -161,6 +191,7 @@ if __name__ == '__main__':
     pts = 2*torch.from_numpy(np.indices((args.val_cube_edge, args.val_cube_edge, args.val_cube_edge))
                              .reshape(3, -1).T).unsqueeze(0)/args.cube_edge - 1.
     best_miou = 0
+    best_custom_miou = 0
 
     best_val_loss = float('inf')  # Start with infinity so first loss is always lower
     val_criterion = nn.CrossEntropyLoss(ignore_index=-100).to(device)
@@ -203,7 +234,7 @@ if __name__ == '__main__':
         if e % eval_every_n_epochs == 0:           
             if e >= 0:
                 # Pass val_criterion to the function
-                miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion)
+                miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion, prefix="Val_S3DIS")
 
                 # Check 1: Best mIoU (Original logic)
                 if miou > best_miou:
@@ -216,6 +247,15 @@ if __name__ == '__main__':
                     best_val_loss = val_loss
                     torch.save(model.state_dict(), logdir+"/val_best_loss.pth")
                     print(f"  Saved new best LOSS model: {best_val_loss:.4f}")
+
+                if vset_custom is not None and len(vset_custom) > 0:
+                    custom_miou, _, _, _ = validate(
+                        writer, vset_custom, vloader_custom, e, model, device, val_criterion, prefix="Val_Custom"
+                    )
+                    if custom_miou > best_custom_miou:
+                        best_custom_miou = custom_miou
+                        torch.save(model.state_dict(), logdir+"/val_best_custom.pth")
+                        print(f"  Saved new best CUSTOM model: {best_custom_miou:.2f}%")
 
                 metrics = Metrics(dset.cnames, device=device)
                 # metrics = Metrics(dset.cnames[1:], device=device)
@@ -270,7 +310,9 @@ if __name__ == '__main__':
         torch.save(model.state_dict(), logdir+"/latest.pth")
         
     # EVALUATION
-    miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion)
+    miou, val_loss, o, y = validate(writer, vset, vloader, e, model, device, val_criterion, prefix="Val_S3DIS")
+    if vset_custom is not None and len(vset_custom) > 0:
+        validate(writer, vset_custom, vloader_custom, e, model, device, val_criterion, prefix="Val_Custom")
     
     if miou > best_miou:
         best_miou = miou

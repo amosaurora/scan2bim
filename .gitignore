@@ -79,6 +79,7 @@ output_instances/
 PLY files/
 scan2bim/
 HePIC/
-testtest/
-test_output/
-visualisation/
+poly_scale/
+poly_scan/
+poly_synth/
+viz_2_backup.py
